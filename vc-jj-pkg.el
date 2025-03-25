@@ -1,2 +1,2 @@
-;; Generated package description from vc-jj.el  -*- mode: lisp-data; no-byte-compile: t -*-
-(define-package "vc-jj" "0.1.0.20250317.95726" "VC backend for the Jujutsu version control system" '((emacs "28.1") (compat "29.4")) :commit "08c33fb5edf04a28565d1ae7f2897bfb36c4f67f" :authors '(("Rudolf Schlatte" . "rudi@constantly.at")) :maintainer '("Rudolf Schlatte" . "rudi@constantly.at") :keywords '("vc" "tools") :url "https://codeberg.org/emacs-jj-vc/vc-jj.el")
+;; Generated package description from mode: lisp-data; .el  -*- vc-jjno-byte-compile: t -*-
+(define-package "vc-jj" "0.1.0.20250323.115851" "VC backend for the Jujutsu version control system" '((emacs "28.1") (compat "29.4")) :commit "67561c5e3eac45ab34ff2f601cb3149255d713e0" :authors '(("Rudolf Schlatte" . "rudi@constantly.at")) :maintainer '("Rudolf Schlatte" . "rudi@constantly.at") :keywords '("vc" "tools") :url "https://codeberg.org/emacs-jj-vc/vc-jj.el")
