@@ -31,7 +31,7 @@
 
   ┌────
   │ [ui]
-  │ diff.format = "git"
+  │ ui.diff-formatter = ":git"
   │ conflict-marker-style = "git"
   └────
 
