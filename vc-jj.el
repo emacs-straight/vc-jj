@@ -456,8 +456,7 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
                  files))))
     (with-current-buffer buffer
       (apply #'vc-jj--command-dispatched buffer
-        'async nil
-        args))))
+        'async nil "log" args))))
 
 (defun vc-jj-show-log-entry (revision)
   "Move to the log entry for REVISION."
@@ -601,12 +600,12 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
   (and vc-parent-buffer
     (with-current-buffer vc-parent-buffer
       (revert-buffer)))
-  (with-current-buffer (revert-buffer)))
+  (revert-buffer))
 
 (defun vc-jj-edit-change ()
   (interactive)
   (let ((rev (log-view-current-tag)))
-    (vc-jj--command-dispatched nil 0 nil "edit" rev "--quiet")
+    (vc-jj-retrieve-tag nil rev nil)
     (vc-jj--reload-log-buffers)))
 
 (defun vc-jj-abandon-change ()
@@ -621,7 +620,6 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
   (interactive)
   (let ((rev (log-view-current-tag)))
     (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")
-    (with-current-buffer (revert-buffer))
     (vc-jj--reload-log-buffers)))
 
 (defun vc-jj-root (file)
@@ -730,6 +728,13 @@ four groups: change id, author, datetime, line number.")
       (if (eq action 'metadata)
           `(metadata . ((display-sort-function . ,#'identity)))
         (complete-with-action action revisions string pred)))))
+
+(defun vc-jj-retrieve-tag (_dir rev _update)
+  "Call jj edit on REV inside DIR.
+REV is the change ID of a jj revision.
+
+_DIR and _UPDATE are as described in the vc.el specification."
+  (vc-jj--command-dispatched nil 0 nil "edit" rev "--quiet"))
 
 (defvar vc-jj-pull-history nil
   "History variable for `vc-jj-pull'.")
