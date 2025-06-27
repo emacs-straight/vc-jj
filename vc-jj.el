@@ -111,16 +111,11 @@ If nil, use the value of `vc-diff-switches'.  If t, use no switches."
 		 (string :tag "Argument String")
 		 (repeat :tag "Argument List" :value ("") string)))
 
-(defun vc-jj--filename-to-fileset (filename &optional root)
-  "Convert FILENAME to a JJ fileset expression.
-If ROOT is non-nil, the resulting fileset is relative to the repository
-root, otherwise it is relative to the current directory."
-  (if root
-      (concat "root:\""
-              (string-replace "\"" "\\\"" (file-relative-name filename root))
-              "\"")
-    (concat "file:\""
-            (string-replace "\"" "\\\"" (file-relative-name filename)) "\"")))
+(defun vc-jj--filename-to-fileset (filename)
+  "Convert FILENAME to a jj fileset expression.
+The fileset expression returned is relative to the jj repository root."
+  (when-let ((path (file-relative-name filename (vc-jj-root filename))))
+    (concat "root:\"" (string-replace "\"" "\\\"" path) "\"")))
 
 (defun vc-jj--process-lines (&rest args)
   "Run jj with ARGS, returning its output to stdout as a list of strings.
@@ -448,6 +443,10 @@ parents.map(|c| concat(
 
 (defun vc-jj-checkin (files comment &optional _rev)
   "Run \"jj commit\" with supplied FILES and COMMENT."
+  ;; FIXME 2025-06-24: Find a more robust solution than
+  ;; `replace-regexp-in-string' on the "Summary" header if possible.
+  ;; Also ideally future-proof by considering the presence of other
+  ;; headers, e.g., `log-edit-headers-alist'.
   (setq comment (replace-regexp-in-string "\\`Summary: " "" comment))
   (let ((args (append (vc-switches 'jj 'checkin) (list "commit" "-m" comment))))
     (apply #'vc-jj--command-dispatched nil 0 files args)))
