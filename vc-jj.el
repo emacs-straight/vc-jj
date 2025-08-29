@@ -33,6 +33,7 @@
 (require 'seq)
 (require 'vc)
 (require 'vc-git)
+(require 'log-view)
 (require 'ansi-color)
 (require 'iso8601)
 (require 'time-date)
@@ -508,12 +509,6 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
 ;;   ;; TODO
 ;;   )
 
-(defvar log-view-message-re)
-(defvar log-view-file-re)
-(defvar log-view-font-lock-keywords)
-(defvar log-view-per-file-logs)
-(defvar log-view-expanded-log-entry-function)
-
 (defvar vc-jj--logline-re
   (rx
     line-start
@@ -725,6 +720,8 @@ For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
 The regex matches each line's commit information and captures
 four groups: change id, author, datetime, line number.")
 
+(declare-function vc-annotate-convert-time "vc-annotate" (&optional time))
+
 (defun vc-jj-annotate-time ()
   "Return the time for the annotated line."
   (and-let*
@@ -750,7 +747,7 @@ element, or can be a change id, in which case we query for the first
 line of its description."
   (let ((description
          (if (listp elem)
-             (second elem)
+             (cl-second elem)
            (vc-jj--command-parseable "log" "-r" elem "--no-graph" "-T" "self.description().first_line()"))))
     (format " %s" (propertize description 'face 'completions-annotations))))
 
@@ -841,7 +838,7 @@ the command to run, e.g., the semi-standard \"jj git push -c @-\"."
 ;;;###autoload
 (defun vc-jj-ensure-log-edit-callback ()
   "Set up `log-edit-callback' when editing jj commit messages."
-  (unless log-edit-callback
+  (unless (bound-and-true-p log-edit-callback)
     (setq-local log-edit-callback (lambda ()
                                     (interactive)
                                     (save-buffer)
