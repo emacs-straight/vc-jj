@@ -6,16 +6,29 @@
 
 *** Added
 
-- Added =vc-jj-retrieve-tag=, which makes it possible to use vc commands
-  like =vc-switch-branch=, which are implemented on top of
-  =vc-retrieve-tag=.
-
-- Added list of other jj support packages for Emacs to the
-  documentation -- not everyone is looking for vc integration :)
-
 *** Changed
 
 *** Removed
+
+*** Fixed
+
+** [[https://codeberg.org/emacs-jj-vc/vc-jj.el/compare/v0.3...v0.4][0.4]] - 2025-09-03
+
+*** Added
+
+- Added =vc-jj-retrieve-tag=, which makes it possible to use vc commands
+  like =vc-switch-branch=, which are implemented on top of
+  =vc-retrieve-tag=.
+- Added =vc-jj-create-tag=, which implements the vc.el create-tag
+  method.  This makes it possible to use vc commands like
+  =vc-create-branch=, which call =vc-create-tag=.
+- Added several commands to manipulate bookmarks in
+  =vc-jj-log-view-mode=: =vc-jj-bookmark-set=, =vc-jj-bookmark-delete=, and
+  =vc-jj-bookmark-rename=.  These have bindings under the "b" prefix key
+  in =vc-jj-log-view-mode=: =vc= buffers.
+
+- Added list of other jj support packages for Emacs to the
+  documentation -- not everyone is looking for vc integration :)
 
 *** Fixed
 

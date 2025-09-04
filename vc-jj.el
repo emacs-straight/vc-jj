@@ -5,7 +5,7 @@
 ;; Author: Wojciech Siewierski
 ;;         Rudolf Schlatte <rudi@constantly.at>
 ;; URL: https://codeberg.org/emacs-jj-vc/vc-jj.el
-;; Version: 0.3
+;; Version: 0.4
 ;; Package-Requires: ((emacs "28.1") (compat "29.4"))
 ;; Keywords: vc tools
 
@@ -460,6 +460,17 @@ parents.map(|c| concat(
       (insert revision)))
   buffer)
 
+(defun vc-jj-create-tag (_dir name branchp)
+  "Attach tag named NAME to the current revision.
+When BRANCHP is non-nil, a bookmark named NAME is created at the current
+revision.
+
+Since jujutsu does not support tagging revisions, a nil value of BRANCHP
+has no effect."
+  (if branchp
+      (vc-jj--command-dispatched nil 0 nil "bookmark" "create" name "--quiet")
+    (user-error "Setting tags is not supported by jujutsu")))
+
 (defun vc-jj-checkout (file &optional rev)
   "Restore the contents of FILE to be the same as in change REV.
 If REV is not specified, revert the file as with `vc-jj-revert'."
@@ -569,7 +580,10 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
 
   (keymap-set vc-jj-log-view-mode-map "r" #'vc-jj-edit-change)
   (keymap-set vc-jj-log-view-mode-map "x" #'vc-jj-abandon-change)
-  (keymap-set vc-jj-log-view-mode-map "i" #'vc-jj-new-change))
+  (keymap-set vc-jj-log-view-mode-map "i" #'vc-jj-new-change)
+  (keymap-set vc-jj-log-view-mode-map "b s" #'vc-jj-bookmark-set)
+  (keymap-set vc-jj-log-view-mode-map "b r" #'vc-jj-bookmark-rename)
+  (keymap-set vc-jj-log-view-mode-map "b D" #'vc-jj-bookmark-delete))
 
 
 (defun vc-jj-expanded-log-entry (revision)
@@ -648,6 +662,82 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
   (let ((rev (log-view-current-tag)))
     (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")
     (vc-jj--reload-log-buffers)))
+
+(defun vc-jj-bookmark-set ()
+  "Set the bookmark of revision at point.
+When called in a `vc-jj-log-view-mode' buffer, prompt for a bookmark to
+set at the revision at point.  If the bookmark already exists and would
+be moved backwards or sideways in the revision history, confirm with the
+user first."
+  (interactive)
+  (when (derived-mode-p 'vc-jj-log-view-mode)
+    (let* ((target-rev (log-view-current-tag))
+           (bookmarks (vc-jj--process-lines "bookmark" "list" "-T" "self.name() ++ \"\n\""))
+           (bookmark (completing-read "Move or create bookmark: " bookmarks))
+           (new-bookmark-p (not (member bookmark bookmarks)))
+           ;; If the bookmark already exists and target-rev is not a
+           ;; descendant of the revision that the bookmark is
+           ;; currently on, this means that the bookmark will be moved
+           ;; sideways or backwards
+           (backwards-move-p
+            (when (not new-bookmark-p)
+              (let* ((bookmark-rev
+                      (car (vc-jj--process-lines "show" bookmark "--no-patch"
+                                                 "-T" "self.change_id().shortest() ++ \"\n\"")))
+                     (bookmark-descendants
+                      (vc-jj--process-lines "log" "--no-graph" "-r" (concat bookmark-rev "..")
+                                            "-T" "self.change_id().shortest() ++ \"\n\"")))
+                (not (member target-rev bookmark-descendants))))))
+      (when backwards-move-p
+        (unless (yes-or-no-p
+                 (format-prompt "Moving bookmark %s to revision %s would move it either backwards or sideways. Is this okay?"
+                                nil bookmark target-rev bookmark))
+          (user-error "Aborted moving bookmark %s to revision %s" bookmark target-rev)))
+      (vc-jj--command-dispatched nil 0 nil "bookmark" "set" bookmark "-r" target-rev
+                                 "--allow-backwards" "--quiet")
+      (revert-buffer))))
+
+(defun vc-jj-bookmark-rename ()
+  "Rename a bookmark pointing to the revision at point.
+When called in a `vc-jj-log-view-mode' buffer, rename the bookmark
+pointing to the revision at point.  If there are multiple bookmarks
+pointing to the revision, prompt the user to one of these bookmarks to
+rename."
+  (interactive)
+  (when (derived-mode-p 'vc-jj-log-view-mode)
+    (let* ((target-rev (log-view-current-tag))
+           (bookmarks-at-rev
+            (vc-jj--process-lines "bookmark" "list" "-r" target-rev
+                                  "-T" "if(!self.remote(), self.name() ++ \"\n\")"))
+           (bookmark-old
+            (if (= 1 (length bookmarks-at-rev))
+                (car bookmarks-at-rev)
+              (completing-read "Which bookmark to rename? " bookmarks-at-rev)))
+           (bookmark-new
+            (read-string (format-prompt "Rename %s to" nil bookmark-old))))
+      (vc-jj--command-dispatched nil 0 nil "bookmark" "rename" bookmark-old bookmark-new
+                                 "--quiet")
+      (revert-buffer))))
+
+(defun vc-jj-bookmark-delete ()
+  "Delete bookmark of the revision at point.
+When called in a `vc-jj-log-view-mode' buffer, delete the bookmark of
+the revision at point.  If there are multiple bookmarks attached to the
+revision, prompt the user to choose one or more of these bookmarks to
+delete."
+  (interactive)
+  (when (derived-mode-p 'vc-jj-log-view-mode)
+    (let* ((rev (log-view-current-tag))
+           (revision-bookmarks
+            (string-split (vc-jj--command-parseable "show" "-r" rev "--no-patch"
+                                                    "-T" "self.local_bookmarks() ++ \"\n\"")
+                          " " t "\n"))
+           (bookmarks
+            (if (< 1 (length revision-bookmarks))
+                (completing-read-multiple "Delete bookmarks: " revision-bookmarks nil t)
+              revision-bookmarks)))
+      (apply #'vc-jj--command-dispatched nil 0 nil "--quiet" "bookmark" "delete" bookmarks)
+      (revert-buffer))))
 
 (defun vc-jj-root (file)
   "Return the root of the repository containing FILE.
