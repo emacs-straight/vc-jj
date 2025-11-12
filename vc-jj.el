@@ -175,6 +175,16 @@ stderr and1 `vc-do-command' cannot separate output to stdout and stderr."
            nil
            (append global-switches flags filesets))))
 
+(defun vc-jj-clone (remote directory rev)
+  "Attempt to clone REMOTE repository into DIRECTORY at revision REV.
+On failure, return nil.  Upon success, return DIRECTORY."
+  (let ((successp (ignore-errors
+                    (vc-jj--command-dispatched nil 0 nil "git" "clone" "--colocate" remote directory))))
+    (when (and successp rev)
+      (let ((default-directory directory))
+        (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")))
+    (when successp directory)))
+
 ;;;###autoload (defun vc-jj-registered (file)
 ;;;###autoload   "Return non-nil if FILE is registered with jj."
 ;;;###autoload   (if (and (vc-find-root file ".jj")   ; Short cut.
