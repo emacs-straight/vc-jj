@@ -605,29 +605,33 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
 
 (defun vc-jj-previous-revision (file rev)
   "JJ-specific version of `vc-previous-revision'."
-  ;; TODO: here and in `vc-jj-next-revision', check how (concat
-  ;; revision "-") works with merge commits; do we get multiple change
-  ;; ids in a multi-line string, and does this break users of these
-  ;; functions?
   (if file
-      (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
-                                "-r" (concat ".." rev "-")
-                                "-T" "change_id.shortest()"
+      (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
+                                "-r" (concat "ancestors(" rev ")")
+                                "-T" "change_id"
                                 "--" (vc-jj--filename-to-fileset file))
-    (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
-                              "-r" (concat rev "-")
-                              "-T" "change_id.shortest()"
-                              )))
+    ;; The jj manual states that "for merges, [first_parent] only
+    ;; returns the first parent instead of returning all parents";
+    ;; given the choice, we do want to return the first parent of a
+    ;; merge change.
+    (vc-jj--command-parseable "log" "--no-graph"
+                              "-r" (concat "first_parent(" rev ")")
+                              "-T" "change_id")))
 
 (defun vc-jj-next-revision (file rev)
   "JJ-specific version of `vc-next-revision'."
   (if file
-      (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
-                                "-r" (format "roots(files(\"%s\") ~ ::%s)" file rev)
-                                "-T" "change_id.shortest()")
-    (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
-                              "-r" (concat rev "+")
-                              "-T" "change_id.shortest()")))
+      (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
+                                "-r" (concat "descendants(" rev ")")
+                                 "-T" "change_id"
+                                 "--" (vc-jj--filename-to-fileset file))
+    ;; Note: experimentally, jj (as of 0.35.0) prints children in LIFO
+    ;; order (newest child first), but we should not rely on that
+    ;; behavior and since none of the children of a change are
+    ;; special, we return an arbitrary one.
+    (car (vc-jj--process-lines "log" "--no-graph"
+                                 "-r" (concat "children(" rev ")")
+                                 "-T" "change_id ++ \"\n\""))))
 
 (defun vc-jj-get-change-comment (_files rev)
   (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
@@ -784,7 +788,7 @@ For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
       0)))
 
 (defun vc-jj-annotate-command (file buf &optional rev)
-  "Fill BUF with per-line commit history of FILE at REV."
+  "Fill BUF with per-line change history of FILE at REV."
   (let ((rev (or rev "@"))
         (file (file-relative-name file)))
     ;; Contrary to most other jj commands, 'jj file annotate' takes a
@@ -809,7 +813,7 @@ For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
   ;; TODO: find out if the output changes when the file got renamed
   ;; somewhere in its history
   "Regex for the output of \"jj file annotate\".
-The regex matches each line's commit information and captures
+The regex matches each line's change information and captures
 four groups: change id, author, datetime, line number.")
 
 (declare-function vc-annotate-convert-time "vc-annotate" (&optional time))
@@ -929,7 +933,7 @@ the command to run, e.g., the semi-standard \"jj git push -c @-\"."
 (add-hook 'log-edit-mode-hook #'vc-jj-ensure-log-edit-callback)
 ;;;###autoload
 (defun vc-jj-ensure-log-edit-callback ()
-  "Set up `log-edit-callback' when editing jj commit messages."
+  "Set up `log-edit-callback' when editing jj change descriptions."
   (unless (bound-and-true-p log-edit-callback)
     (setq-local log-edit-callback (lambda ()
                                     (interactive)
