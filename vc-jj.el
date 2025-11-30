@@ -114,10 +114,14 @@ If nil, use the value of `vc-diff-switches'.  If t, use no switches."
 		 (repeat :tag "Argument List" :value ("") string)))
 
 (defun vc-jj--filename-to-fileset (filename)
-  "Convert FILENAME to a jj fileset expression.
-The fileset expression returned is relative to the jj repository root."
-  (when-let* ((path (file-relative-name filename (vc-jj-root filename))))
-    (concat "root:\"" (string-replace "\"" "\\\"" path) "\"")))
+  "Convert FILENAME to a JJ fileset expression.
+The fileset expression returned is relative to the JJ repository root.
+
+When FILENAME is not inside a JJ repository, throw an error."
+  (if-let ((root (vc-jj-root filename))
+           (default-directory root))
+      (format "root:%S" (file-relative-name filename root))
+    (error "File is not inside a JJ repository: %s" filename)))
 
 (defun vc-jj--process-lines (&rest args)
   "Run jj with ARGS, returning its output to stdout as a list of strings.
@@ -193,13 +197,10 @@ On failure, return nil.  Upon success, return DIRECTORY."
 ;;;###autoload         (load "vc-jj" nil t)
 ;;;###autoload         (vc-jj-registered file))))
 (defun vc-jj-registered (file)
-  "Check whether FILE is registered with jj."
-  (and-let* ((vc-jj-program (executable-find vc-jj-program))
-             (default-directory (vc-jj-root file)))
-    (with-temp-buffer
-      (and (= 0 (call-process vc-jj-program nil (list t nil) nil
-                              "file" "list" "--" (vc-jj--filename-to-fileset file)))
-           (/= (point-min) (point-max))))))
+  "Check whether FILE is registered with jj.
+Return non-nil when FILE is file tracked by JJ and nil when not."
+  (when-let ((default-directory (vc-jj-root file)))
+    (vc-jj--process-lines "file" "list" "--" (vc-jj--filename-to-fileset file))))
 
 (defun vc-jj-state (file)
   "JJ implementation of `vc-state' for FILE.
@@ -593,14 +594,18 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
 
 
 (defun vc-jj-expanded-log-entry (revision)
+  "Return a string of the commit details of REVISION.
+Called by `log-view-toggle-entry-display' in a JJ Log View buffer."
   (with-temp-buffer
-    (vc-jj--command-dispatched t 0 nil
-      "log"
-      "-r" revision
-      "-T" "builtin_log_detailed"
-      "--color" "never"
-      "--no-graph"
-      "--")
+    (vc-jj--command-dispatched
+     t 0 nil "log"
+     ;; REVISION may be divergent (i.e., several revisions with the
+     ;; same change ID).  In those cases, we opt to avoid jj erroring
+     ;; via "-r change_id(REVISION)" and show only all the divergent
+     ;; commits.  This is preferable to confusing or misinforming the
+     ;; user by showing only some of the divergent commits.
+     "-r" (format "change_id(%s)" revision)
+     "--no-graph" "-T" "builtin_log_detailed")
     (buffer-string)))
 
 (defun vc-jj-previous-revision (file rev)
@@ -674,7 +679,7 @@ When called in a `vc-jj-log-view-mode' buffer, prompt for a bookmark to
 set at the revision at point.  If the bookmark already exists and would
 be moved backwards or sideways in the revision history, confirm with the
 user first."
-  (interactive)
+  (interactive nil vc-jj-log-view-mode)
   (when (derived-mode-p 'vc-jj-log-view-mode)
     (let* ((target-rev (log-view-current-tag))
            (bookmarks (vc-jj--process-lines "bookmark" "list" "-T" "self.name() ++ \"\n\""))
@@ -708,7 +713,7 @@ When called in a `vc-jj-log-view-mode' buffer, rename the bookmark
 pointing to the revision at point.  If there are multiple bookmarks
 pointing to the revision, prompt the user to one of these bookmarks to
 rename."
-  (interactive)
+  (interactive nil vc-jj-log-view-mode)
   (when (derived-mode-p 'vc-jj-log-view-mode)
     (let* ((target-rev (log-view-current-tag))
            (bookmarks-at-rev
@@ -730,13 +735,15 @@ When called in a `vc-jj-log-view-mode' buffer, delete the bookmark of
 the revision at point.  If there are multiple bookmarks attached to the
 revision, prompt the user to choose one or more of these bookmarks to
 delete."
-  (interactive)
+  (interactive nil vc-jj-log-view-mode)
   (when (derived-mode-p 'vc-jj-log-view-mode)
     (let* ((rev (log-view-current-tag))
            (revision-bookmarks
-            (string-split (vc-jj--command-parseable "show" "-r" rev "--no-patch"
-                                                    "-T" "self.local_bookmarks() ++ \"\n\"")
-                          " " t "\n"))
+            (string-split
+             (vc-jj--command-parseable
+              "show" "-r" rev "--no-patch"
+              "-T" "self.local_bookmarks().map(|b| b.name()) ++ \"\n\"")
+             " " t "\n"))
            (bookmarks
             (if (< 1 (length revision-bookmarks))
                 (completing-read-multiple "Delete bookmarks: " revision-bookmarks nil t)
