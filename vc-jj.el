@@ -24,7 +24,39 @@
 
 ;;; Commentary:
 
-;; A backend for vc.el to handle Jujutsu repositories.
+;; A backend for vc.el to handle Jujutsu (jj) repositories.
+;;
+;; Jujutsu is a distributed version control system that uses the same
+;; on-disk storage format as git (although other storage backends are
+;; possible).  Jj repositories are "co-located" by default, which
+;; means they contain both a '.jj' and a '.git' directory in the
+;; repository root.  Therefore, vc-jj can re-use some functionality of
+;; vc-git, like handling of '.gitignore' files.  It is possible to run
+;; git commands in a co-located repository, although git will complain
+;; about being in "detached HEAD" state.
+;;
+;; Note that 'JJ' should come before 'Git' in `vc-handled-backends' so
+;; that 'vc' chooses the jj backend.
+;;
+;; In jj terminology, vc "revisions" are called "changes" and are
+;; identified by a "change ID"; the code in vc-jj tries to adhere to
+;; this terminology.
+;;
+;; In contrast to git, there is no staging area or check-in operation:
+;; as the user modifies a file, the changes are automatically
+;; recorded.  Note that the change ID stays constant when the current
+;; change is being modified, e.g., by editing a file.  Underlying each
+;; change is a (git-type) commit with a commit ID; the commit ID
+;; changes when a change gets modified.  Most jj commands accept both
+;; change IDs and commit IDs.  We display both change ID and commit ID
+;; where appropriate, for example in the extra headers of vc-dir
+;; buffers.
+;;
+
+;; After the "Customization" and "Internal Utilities" sections, the
+;; organization of this file follows the "BACKEND PROPERTIES" section
+;; at the beginning of 'vc.el', implementing the functions listed
+;; there in the same order.
 
 ;;; Code:
 
@@ -38,12 +70,9 @@
 (require 'ansi-color)
 (require 'iso8601)
 (require 'time-date)
+(declare-function vc-annotate-convert-time "vc-annotate" (&optional time))
 
-(add-to-list 'vc-handled-backends 'JJ)
-
-(defun vc-jj-revision-granularity () 'repository)
-(defun vc-jj-checkout-model (_files) 'implicit)
-(defun vc-jj-update-on-retrieve-tag () nil)
+;;; Customization
 
 (defgroup vc-jj nil
   "VC Jujutsu backend."
@@ -53,35 +82,6 @@
   "Name of the jj executable (excluding any arguments)."
   :type 'string
   :risky t)
-
-(defvar vc-jj--log-default-template
-  "
-if(root,
-  format_root_commit(self),
-  label(if(current_working_copy, \"working_copy\"),
-    concat(
-      separate(\" \",
-        change_id.shortest(8).prefix() ++ \"​\" ++ change_id.shortest(8).rest(),
-        if(author.name(), author.name(), if(author.email(), author.email().local(), email_placeholder)),
-        commit_timestamp(self).format(\"%Y-%m-%d\"),
-        bookmarks,
-        tags,
-        working_copies,
-        if(git_head, label(\"git_head\", \"git_head()\")),
-        format_short_commit_id(commit_id),
-        if(conflict, label(\"conflict\", \"conflict\")),
-        if(config(\"ui.show-cryptographic-signatures\").as_boolean(),
-          format_short_cryptographic_signature(signature)),
-        if(empty, label(\"empty\", \"(empty)\")),
-        if(description,
-          description.first_line(),
-          label(if(empty, \"empty\"), description_placeholder),
-        ),
-      ) ++ \"\n\",
-    ),
-  )
-)
-")
 
 (defcustom vc-jj-global-switches '("--no-pager" "--color" "never")
   "Global switches to pass to any jj command."
@@ -113,6 +113,15 @@ If nil, use the value of `vc-diff-switches'.  If t, use no switches."
 		 (string :tag "Argument String")
 		 (repeat :tag "Argument List" :value ("") string)))
 
+;;; Internal Utilities
+
+;; Note that 'JJ' should come before 'Git' in `vc-handled-backends',
+;; since by default a jj repository contains both '.jj' and '.git'
+;; directories.
+
+;;;###autoload
+(add-to-list 'vc-handled-backends 'JJ)
+
 (defun vc-jj--filename-to-fileset (filename)
   "Convert FILENAME to a JJ fileset expression.
 The fileset expression returned is relative to the JJ repository root.
@@ -122,6 +131,21 @@ When FILENAME is not inside a JJ repository, throw an error."
            (default-directory root))
       (format "root:%S" (file-relative-name filename root))
     (error "File is not inside a JJ repository: %s" filename)))
+
+(defun vc-jj--set-up-process-buffer (buffer root command)
+  (with-current-buffer buffer
+    (vc-run-delayed
+      (vc-compilation-mode 'jj)
+      (setq-local compile-command (string-join command " "))
+      (setq-local compilation-directory root)
+      ;; Either set `compilation-buffer-name-function' locally to nil
+      ;; or use `compilation-arguments' to set `name-function'.
+      ;; See `compilation-buffer-name'.
+      (setq-local compilation-arguments
+                  (list compile-command nil
+                        (lambda (_name-of-mode) buffer)
+                        nil))))
+  (vc-set-async-update buffer))
 
 (defun vc-jj--process-lines (&rest args)
   "Run jj with ARGS, returning its output to stdout as a list of strings.
@@ -179,15 +203,17 @@ stderr and1 `vc-do-command' cannot separate output to stdout and stderr."
            nil
            (append global-switches flags filesets))))
 
-(defun vc-jj-clone (remote directory rev)
-  "Attempt to clone REMOTE repository into DIRECTORY at revision REV.
-On failure, return nil.  Upon success, return DIRECTORY."
-  (let ((successp (ignore-errors
-                    (vc-jj--command-dispatched nil 0 nil "git" "clone" "--colocate" remote directory))))
-    (when (and successp rev)
-      (let ((default-directory directory))
-        (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")))
-    (when successp directory)))
+;;; BACKEND PROPERTIES
+
+;;;; revision-granularity
+(defun vc-jj-revision-granularity () 'repository)
+
+;;;; update-on-retrieve-tag
+(defun vc-jj-update-on-retrieve-tag () nil)
+
+;;; STATE-QUERYING FUNCTIONS
+
+;;;; registered
 
 ;;;###autoload (defun vc-jj-registered (file)
 ;;;###autoload   "Return non-nil if FILE is registered with jj."
@@ -200,7 +226,10 @@ On failure, return nil.  Upon success, return DIRECTORY."
   "Check whether FILE is registered with jj.
 Return non-nil when FILE is file tracked by JJ and nil when not."
   (when-let ((default-directory (vc-jj-root file)))
-    (vc-jj--process-lines "file" "list" "--" (vc-jj--filename-to-fileset file))))
+    (vc-jj--process-lines "file" "list" "--"
+                          (vc-jj--filename-to-fileset file))))
+
+;;;; state
 
 (defun vc-jj-state (file)
   "JJ implementation of `vc-state' for FILE.
@@ -250,6 +279,8 @@ there is no such state in jj since jj automatically registers new files."
            (t
             (warn "VC state of %s is not recognized, assuming up-to-date" file)
             'up-to-date)))))))
+
+;;;; dir-status-file
 
 (defun vc-jj-dir-status-files (dir _files update-function)
   "Calculate a list of (FILE STATE EXTRA) entries for DIR.
@@ -314,6 +345,8 @@ For a description of the states relevant to jj, see `vc-jj-state'."
                    (mapcar (lambda (entry) (list entry 'ignored)) ignored-files)
                    (mapcar (lambda (entry) (list entry 'up-to-date)) up-to-date-files))))
       (funcall update-function result nil))))
+
+;;;; dir-extra-headers
 
 (defun vc-jj-dir-extra-headers (dir)
   "Return extra headers for `vc-dir' when executed inside DIR.
@@ -399,6 +432,12 @@ parents.map(|c| concat(
            parent-keys))
          "\n")))))
 
+;;;; dir-printer
+
+;;;; status-fileinfo-extra
+
+;;;; working-revision
+
 (defun vc-jj-working-revision (file)
   "Return the current change id of the repository containing FILE."
   (when-let* ((default-directory (vc-jj-root file)))
@@ -408,6 +447,12 @@ parents.map(|c| concat(
     (car (last (vc-jj--process-lines "log" "--no-graph"
                                      "-r" "@"
                                      "-T" "change_id ++ \"\\n\"")))))
+
+;;;; checkout-model
+
+(defun vc-jj-checkout-model (_files) 'implicit)
+
+;;;; mode-line-string
 
 (defun vc-jj-mode-line-string (file)
   "Return a mode line string and tooltip for FILE."
@@ -426,11 +471,17 @@ parents.map(|c| concat(
                                    "\nCurrent change: " long-rev
                                    " (" description ")"))))
 
+;;; STATE-CHANGING FUNCTIONS
+
+;;;; create-repo
+
 (defun vc-jj-create-repo ()
   "Create an empty jj repository in the current directory."
   (if current-prefix-arg
       (call-process vc-jj-program nil nil nil "git" "init" "--colocate")
     (call-process vc-jj-program nil nil nil "git" "init")))
+
+;;;; register
 
 (defun vc-jj-register (files &optional _comment)
   "Register FILES into the jj version-control system."
@@ -441,16 +492,15 @@ parents.map(|c| concat(
   ;; such as the .gitignore file.
   (vc-jj--command-dispatched nil 0 files "file" "track" "--"))
 
-(defun vc-jj-delete-file (file)
-  "Delete FILE and make sure jj registers the change."
-  (when (file-exists-p file)
-    (delete-file file)
-    (vc-jj--command-dispatched nil 0 nil "status")))
+;;;; responsible-p
 
-(defun vc-jj-rename-file (old new)
-  "Rename file OLD to NEW and make sure jj registers the change."
-  (rename-file old new)
-  (vc-jj--command-dispatched nil 0 nil "status"))
+(defalias 'vc-jj-responsible-p #'vc-jj-root)
+
+;;;; receive-file
+
+;;;; unregister
+
+;;;; checkin
 
 (defun vc-jj-checkin (files comment &optional _rev)
   "Run \"jj commit\" with supplied FILES and COMMENT."
@@ -458,6 +508,10 @@ parents.map(|c| concat(
          (args (append (vc-switches 'jj 'checkin)
                        (list "commit" "-m" comment))))
     (apply #'vc-jj--command-dispatched nil 0 files args)))
+
+;;;; checkin-patch
+
+;;;; find-revision
 
 (defun vc-jj-find-revision (file rev buffer)
   "Read revision REV of FILE into BUFFER and return the buffer."
@@ -467,16 +521,7 @@ parents.map(|c| concat(
       (insert revision)))
   buffer)
 
-(defun vc-jj-create-tag (_dir name branchp)
-  "Attach tag named NAME to the current revision.
-When BRANCHP is non-nil, a bookmark named NAME is created at the current
-revision.
-
-Since jujutsu does not support tagging revisions, a nil value of BRANCHP
-has no effect."
-  (if branchp
-      (vc-jj--command-dispatched nil 0 nil "bookmark" "create" name "--quiet")
-    (user-error "Setting tags is not supported by jujutsu")))
+;;;; checkout
 
 (defun vc-jj-checkout (file &optional rev)
   "Restore the contents of FILE to be the same as in change REV.
@@ -486,9 +531,115 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
   (let ((args (append (and rev (list "--from" rev)))))
     (apply #'vc-jj--command-dispatched nil 0 file "restore" args)))
 
+;;;; revert
+
 (defun vc-jj-revert (file &optional _contents-done)
   "Restore FILE to the state from its parent(s), via \"jj restore\"."
   (vc-jj--command-dispatched nil 0 file "restore"))
+
+;;;; merge-file
+
+;;;; merge-branch
+
+;;;; merge-news
+
+;;;; pull
+
+(defvar vc-jj-pull-history nil
+  "History variable for `vc-jj-pull'.")
+
+(defun vc-jj-pull (prompt)
+  "Pull changes from an upstream repository, invoked via \\[vc-update].
+Normally, this runs \"jj git fetch\".  If PROMPT is non-nil, prompt for
+the jj command to run."
+  (let* ((command (if prompt
+                      (split-string-shell-command
+		       (read-shell-command
+                        (format "jj git fetch command: ")
+                        (concat vc-jj-program " git fetch")
+                        'vc-jj-pull-history))
+                    `(,vc-jj-program "git" "fetch")))
+         (jj-program (car command))
+         (args (cdr command))
+         (root (vc-jj-root default-directory))
+         (buffer (format "*vc-jj : %s*" (expand-file-name root))))
+    (apply #'vc-do-async-command buffer root jj-program args)
+    (vc-jj--set-up-process-buffer buffer root command)))
+
+;;;; push
+
+(defvar vc-jj-push-history nil
+  "History variable for `vc-jj-push'.")
+
+(defun vc-jj-push (prompt)
+  "Push changes to an upstream repository, invoked via \\[vc-push].
+Normally, this runs \"jj git push\".  If PROMPT is non-nil, prompt for
+the command to run, e.g., the semi-standard \"jj git push -c @-\"."
+  (let* ((command (if prompt
+                      (split-string-shell-command
+		       (read-shell-command
+                        (format "jj git push command: ")
+                        (concat vc-jj-program " git push")
+                        'vc-jj-push-history))
+                    `(,vc-jj-program "git" "push")))
+         (jj-program (car command))
+         (args (cdr command))
+         (root (vc-jj-root default-directory))
+         (buffer (format "*vc-jj : %s*" (expand-file-name root))))
+    (apply #'vc-do-async-command buffer root jj-program args)
+    (vc-jj--set-up-process-buffer buffer root command)))
+
+;;;; steal-lock
+
+;;;; get-change-comment
+
+(defun vc-jj-get-change-comment (_files rev)
+  (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
+                            "-r" rev "-T" "description"))
+
+;;;; modify-change-comment
+
+;; TODO: protect immutable changes
+(defun vc-jj-modify-change-comment (_files rev comment)
+  (let ((comment (car (log-edit-extract-headers () comment))))
+    (vc-jj--command-dispatched nil 0 nil "desc" rev "-m" comment "--quiet")))
+
+;;;; mark-resolved
+
+;;;; find-admin-dir
+
+;;; HISTORY FUNCTIONS
+
+;;;; print-log
+
+(defvar vc-jj--log-default-template
+  "
+if(root,
+  format_root_commit(self),
+  label(if(current_working_copy, \"working_copy\"),
+    concat(
+      separate(\" \",
+        change_id.shortest(8).prefix() ++ \"​\" ++ change_id.shortest(8).rest(),
+        if(author.name(), author.name(), if(author.email(), author.email().local(), email_placeholder)),
+        commit_timestamp(self).format(\"%Y-%m-%d\"),
+        bookmarks,
+        tags,
+        working_copies,
+        if(git_head, label(\"git_head\", \"git_head()\")),
+        format_short_commit_id(commit_id),
+        if(conflict, label(\"conflict\", \"conflict\")),
+        if(config(\"ui.show-cryptographic-signatures\").as_boolean(),
+          format_short_cryptographic_signature(signature)),
+        if(empty, label(\"empty\", \"(empty)\")),
+        if(description,
+          description.first_line(),
+          label(if(empty, \"empty\"), description_placeholder),
+        ),
+      ) ++ \"\n\",
+    ),
+  )
+)
+")
 
 (defun vc-jj-print-log (files buffer &optional _shortlog start-revision limit)
   "Print commit log associated with FILES into specified BUFFER."
@@ -509,23 +660,21 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
       (apply #'vc-jj--command-dispatched buffer
         'async nil "log" args))))
 
-(defun vc-jj-show-log-entry (revision)
-  "Move to the log entry for REVISION."
-  ;; TODO: check that this works for all forms of log output, or at
-  ;; least the predefined ones
-  (goto-char (point-min))
-  (when (search-forward-regexp
-         ;; TODO: reformulate using `rx'
-         (concat "^[^|]\\s-+\\(" (regexp-quote revision) "\\)\\s-+")
-         nil t)
-    (goto-char (match-beginning 1))))
+;;;; log-outgoing
 
 ;; (defun vc-jj-log-outgoing (buffer remote-location)
 ;;   ;; TODO
 ;;   )
+
+;;;; log-incoming
+
 ;; (defun vc-jj-log-incoming (buffer remote-location)
 ;;   ;; TODO
 ;;   )
+
+;;;; log-search
+
+;;;; log-view-mode
 
 (defvar vc-jj--logline-re
   (rx
@@ -562,38 +711,10 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
                 "")))
     ;; regular description
     (* nonl)
-    line-end))
+    line-end)
+  "Regular expression matching one line in the outpout of 'jj log'.")
 
-(define-derived-mode vc-jj-log-view-mode log-view-mode "JJ-Log-View"
-  (require 'add-log) ;; We need the faces add-log.
-  ;; Don't have file markers, so use impossible regexp.
-  (setq-local log-view-file-re regexp-unmatchable)
-  (setq-local log-view-per-file-logs nil)
-  (setq-local log-view-message-re vc-jj--logline-re)
-  ;; Allow expanding short log entries.
-  (setq truncate-lines t)
-  (setq-local log-view-expanded-log-entry-function
-    'vc-jj-expanded-log-entry)
-  (setq-local log-view-font-lock-keywords
-    `((,vc-jj--logline-re
-        (1 'log-view-message)
-        (2 'change-log-list)
-        (3 'change-log-name)
-        (4 'change-log-date)
-        (5 'change-log-file)
-        (6 'change-log-list)
-        (7 'change-log-function)
-        (8 'change-log-function))))
-
-  (keymap-set vc-jj-log-view-mode-map "r" #'vc-jj-edit-change)
-  (keymap-set vc-jj-log-view-mode-map "x" #'vc-jj-abandon-change)
-  (keymap-set vc-jj-log-view-mode-map "i" #'vc-jj-new-change)
-  (keymap-set vc-jj-log-view-mode-map "b s" #'vc-jj-bookmark-set)
-  (keymap-set vc-jj-log-view-mode-map "b r" #'vc-jj-bookmark-rename)
-  (keymap-set vc-jj-log-view-mode-map "b D" #'vc-jj-bookmark-delete))
-
-
-(defun vc-jj-expanded-log-entry (revision)
+(defun vc-jj--expanded-log-entry (revision)
   "Return a string of the commit details of REVISION.
 Called by `log-view-toggle-entry-display' in a JJ Log View buffer."
   (with-temp-buffer
@@ -608,58 +729,19 @@ Called by `log-view-toggle-entry-display' in a JJ Log View buffer."
      "--no-graph" "-T" "builtin_log_detailed")
     (buffer-string)))
 
-(defun vc-jj-previous-revision (file rev)
-  "JJ-specific version of `vc-previous-revision'."
-  (if file
-      (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
-                                "-r" (concat "ancestors(" rev ")")
-                                "-T" "change_id"
-                                "--" (vc-jj--filename-to-fileset file))
-    ;; The jj manual states that "for merges, [first_parent] only
-    ;; returns the first parent instead of returning all parents";
-    ;; given the choice, we do want to return the first parent of a
-    ;; merge change.
-    (vc-jj--command-parseable "log" "--no-graph"
-                              "-r" (concat "first_parent(" rev ")")
-                              "-T" "change_id")))
-
-(defun vc-jj-next-revision (file rev)
-  "JJ-specific version of `vc-next-revision'."
-  (if file
-      (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
-                                "-r" (concat "descendants(" rev ")")
-                                 "-T" "change_id"
-                                 "--" (vc-jj--filename-to-fileset file))
-    ;; Note: experimentally, jj (as of 0.35.0) prints children in LIFO
-    ;; order (newest child first), but we should not rely on that
-    ;; behavior and since none of the children of a change are
-    ;; special, we return an arbitrary one.
-    (car (vc-jj--process-lines "log" "--no-graph"
-                                 "-r" (concat "children(" rev ")")
-                                 "-T" "change_id ++ \"\n\""))))
-
-(defun vc-jj-get-change-comment (_files rev)
-  (vc-jj--command-parseable "log" "--no-graph" "-n" "1"
-                            "-r" rev "-T" "description"))
-
-;; TODO: protect immutable changes
-(defun vc-jj-modify-change-comment (_files rev comment)
-  (let ((comment (car (log-edit-extract-headers () comment))))
-    (vc-jj--command-dispatched nil 0 nil "desc" rev "-m" comment "--quiet")))
-
 (defun vc-jj--reload-log-buffers ()
   (and vc-parent-buffer
     (with-current-buffer vc-parent-buffer
       (revert-buffer)))
   (revert-buffer))
 
-(defun vc-jj-edit-change ()
+(defun vc-jj-log-view-edit-change ()
   (interactive)
   (let ((rev (log-view-current-tag)))
     (vc-jj-retrieve-tag nil rev nil)
     (vc-jj--reload-log-buffers)))
 
-(defun vc-jj-abandon-change ()
+(defun vc-jj-log-view-abandon-change ()
   (interactive)
   ;; TODO: should probably ask for confirmation, although this would be
   ;; different from the cli
@@ -667,13 +749,13 @@ Called by `log-view-toggle-entry-display' in a JJ Log View buffer."
     (vc-jj--command-dispatched nil 0 nil "abandon" rev "--quiet")
     (vc-jj--reload-log-buffers)))
 
-(defun vc-jj-new-change ()
+(defun vc-jj-log-view-new-change ()
   (interactive)
   (let ((rev (log-view-current-tag)))
     (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")
     (vc-jj--reload-log-buffers)))
 
-(defun vc-jj-bookmark-set ()
+(defun vc-jj-log-view-bookmark-set ()
   "Set the bookmark of revision at point.
 When called in a `vc-jj-log-view-mode' buffer, prompt for a bookmark to
 set at the revision at point.  If the bookmark already exists and would
@@ -707,7 +789,7 @@ user first."
                                  "--allow-backwards" "--quiet")
       (revert-buffer))))
 
-(defun vc-jj-bookmark-rename ()
+(defun vc-jj-log-view-bookmark-rename ()
   "Rename a bookmark pointing to the revision at point.
 When called in a `vc-jj-log-view-mode' buffer, rename the bookmark
 pointing to the revision at point.  If there are multiple bookmarks
@@ -729,7 +811,7 @@ rename."
                                  "--quiet")
       (revert-buffer))))
 
-(defun vc-jj-bookmark-delete ()
+(defun vc-jj-log-view-bookmark-delete ()
   "Delete bookmark of the revision at point.
 When called in a `vc-jj-log-view-mode' buffer, delete the bookmark of
 the revision at point.  If there are multiple bookmarks attached to the
@@ -751,27 +833,52 @@ delete."
       (apply #'vc-jj--command-dispatched nil 0 nil "--quiet" "bookmark" "delete" bookmarks)
       (revert-buffer))))
 
-(defun vc-jj-root (file)
-  "Return the root of the repository containing FILE.
-Return NIL if FILE is not in a jj repository."
-  (vc-find-root file ".jj"))
+(define-derived-mode vc-jj-log-view-mode log-view-mode "JJ-Log-View"
+  (require 'add-log) ;; We need the faces add-log.
+  ;; Don't have file markers, so use impossible regexp.
+  (setq-local log-view-file-re regexp-unmatchable)
+  (setq-local log-view-per-file-logs nil)
+  (setq-local log-view-message-re vc-jj--logline-re)
+  ;; Allow expanding short log entries.
+  (setq truncate-lines t)
+  (setq-local log-view-expanded-log-entry-function
+    'vc-jj--expanded-log-entry)
+  (setq-local log-view-font-lock-keywords
+    `((,vc-jj--logline-re
+        (1 'log-view-message)
+        (2 'change-log-list)
+        (3 'change-log-name)
+        (4 'change-log-date)
+        (5 'change-log-file)
+        (6 'change-log-list)
+        (7 'change-log-function)
+        (8 'change-log-function))))
 
-(defalias 'vc-jj-responsible-p #'vc-jj-root)
+  (keymap-set vc-jj-log-view-mode-map "r" #'vc-jj-log-view-edit-change)
+  (keymap-set vc-jj-log-view-mode-map "x" #'vc-jj-log-view-abandon-change)
+  (keymap-set vc-jj-log-view-mode-map "i" #'vc-jj-log-view-new-change)
+  (keymap-set vc-jj-log-view-mode-map "b s" #'vc-jj-log-view-bookmark-set)
+  (keymap-set vc-jj-log-view-mode-map "b r" #'vc-jj-log-view-bookmark-rename)
+  (keymap-set vc-jj-log-view-mode-map "b D" #'vc-jj-log-view-bookmark-delete))
 
-(defun vc-jj-ignore (file &optional directory remove)
-  "Ignore FILE under DIRECTORY.
+;;;; show-log-entry
 
-FILE is a wildcard specification relative to DIRECTORY.
-DIRECTORY defaults to `default-directory'.
+(defun vc-jj-show-log-entry (revision)
+  "Move to the log entry for REVISION."
+  ;; TODO: check that this works for all forms of log output, or at
+  ;; least the predefined ones
+  (goto-char (point-min))
+  (when (search-forward-regexp
+         ;; TODO: reformulate using `rx'
+         (concat "^[^|]\\s-+\\(" (regexp-quote revision) "\\)\\s-+")
+         nil t)
+    (goto-char (match-beginning 1))))
 
-If REMOVE is non-nil, remove FILE from ignored files instead.
+;;;; comment-history
 
-For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
-  (vc-default-ignore 'Git file directory remove)
-  (let ((default-directory
-         (if directory (file-name-as-directory directory)
-           default-directory)))
-    (vc-jj--command-dispatched nil 0 file "file" (if remove "track" "untrack") "--")))
+;;;; update-changelog
+
+;;;; diff
 
 (defun vc-jj-diff (files &optional rev1 rev2 buffer _async)
   "Display diffs for FILES between revisions REV1 and REV2."
@@ -794,53 +901,7 @@ For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
         1
       0)))
 
-(defun vc-jj-annotate-command (file buf &optional rev)
-  "Fill BUF with per-line change history of FILE at REV."
-  (let ((rev (or rev "@"))
-        (file (file-relative-name file)))
-    ;; Contrary to most other jj commands, 'jj file annotate' takes a
-    ;; path instead of a fileset expression, so we append FILE to the
-    ;; unprocessed argument list here.
-    (apply #'vc-jj--command-dispatched buf 'async nil "file" "annotate"
-           (append (vc-switches 'jj 'annotate)
-                   (list "-r" rev file)))))
-
-(defconst vc-jj--annotation-line-prefix-re
-  (rx bol
-      (group (+ (any "a-z")))           ; change id
-      " "
-      (group (+? anychar))              ; author username
-      (+ " ")
-      (group                            ; iso 8601-ish datetime
-       (= 4 digit) "-" (= 2 digit) "-" (= 2 digit) " "
-       (= 2 digit) ":" (= 2 digit) ":" (= 2 digit))
-      (+ " ")
-      (group (+ digit))                 ; line number
-      ": ")
-  ;; TODO: find out if the output changes when the file got renamed
-  ;; somewhere in its history
-  "Regex for the output of \"jj file annotate\".
-The regex matches each line's change information and captures
-four groups: change id, author, datetime, line number.")
-
-(declare-function vc-annotate-convert-time "vc-annotate" (&optional time))
-
-(defun vc-jj-annotate-time ()
-  "Return the time for the annotated line."
-  (and-let*
-      (((re-search-forward vc-jj--annotation-line-prefix-re nil t))
-       (dt (match-string 3))
-       (dt (and dt (string-replace " " "T" dt)))
-       (decoded (ignore-errors (iso8601-parse dt))))
-    (vc-annotate-convert-time
-     (encode-time (decoded-time-set-defaults decoded)))))
-
-(defun vc-jj-annotate-extract-revision-at-line ()
-  "Return the revision (change id) for the annotated line."
-  (save-excursion
-    (beginning-of-line)
-    (when (looking-at vc-jj--annotation-line-prefix-re)
-      (match-string-no-properties 1))))
+;;;; revision-completion-table
 
 (defun vc-jj--revision-annotation-function (elem)
   "Calculate propertized change description from ELEM.
@@ -868,6 +929,93 @@ line of its description."
                         (annotation-function . ,#'vc-jj--revision-annotation-function)))
         (complete-with-action action revisions string pred)))))
 
+;;;; annotate-command
+
+(defun vc-jj-annotate-command (file buf &optional rev)
+  "Fill BUF with per-line change history of FILE at REV."
+  (let ((rev (or rev "@"))
+        (file (file-relative-name file)))
+    ;; Contrary to most other jj commands, 'jj file annotate' takes a
+    ;; path instead of a fileset expression, so we append FILE to the
+    ;; unprocessed argument list here.
+    (apply #'vc-jj--command-dispatched buf 'async nil "file" "annotate"
+           (append (vc-switches 'jj 'annotate)
+                   (list "-r" rev file)))))
+
+;;;; annotate-time
+
+(defconst vc-jj--annotation-line-prefix-re
+  (rx bol
+      (group (+ (any "a-z")))           ; change id
+      " "
+      (group (+? anychar))              ; author username
+      (+ " ")
+      (group                            ; iso 8601-ish datetime
+       (= 4 digit) "-" (= 2 digit) "-" (= 2 digit) " "
+       (= 2 digit) ":" (= 2 digit) ":" (= 2 digit))
+      (+ " ")
+      (group (+ digit))                 ; line number
+      ": ")
+  ;; TODO: find out if the output changes when the file got renamed
+  ;; somewhere in its history
+  "Regex for the output of \"jj file annotate\".
+The regex matches each line's change information and captures
+four groups: change id, author, datetime, line number.")
+
+(defun vc-jj-annotate-time ()
+  "Return the time for the annotated line."
+  (and-let*
+      (((re-search-forward vc-jj--annotation-line-prefix-re nil t))
+       (dt (match-string 3))
+       (dt (and dt (string-replace " " "T" dt)))
+       (decoded (ignore-errors (iso8601-parse dt))))
+    (vc-annotate-convert-time
+     (encode-time (decoded-time-set-defaults decoded)))))
+
+;;;; annotate-current-time
+
+;;;; annotate-extract-revision-at-line
+
+(defun vc-jj-annotate-extract-revision-at-line ()
+  "Return the revision (change id) for the annotated line."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at vc-jj--annotation-line-prefix-re)
+      (match-string-no-properties 1))))
+
+;;;; region-history
+
+(defun vc-jj-region-history (file buffer lfrom lto)
+  ;; Support for vc-region-history via the git version which works
+  ;; fine at least when co-located with git.
+  (vc-git-region-history file buffer lfrom lto))
+
+;;;; region-history-mode
+
+(define-derived-mode vc-jj-region-history-mode vc-git-region-history-mode
+  "JJ/Git-Region-History")
+
+;;;; mergebase
+
+;;;; last-change
+
+;;; TAG/BRANCH SYSTEM
+
+;;;; create-tag
+
+(defun vc-jj-create-tag (_dir name branchp)
+  "Attach tag named NAME to the current revision.
+When BRANCHP is non-nil, a bookmark named NAME is created at the current
+revision.
+
+Since jujutsu does not support tagging revisions, a nil value of BRANCHP
+has no effect."
+  (if branchp
+      (vc-jj--command-dispatched nil 0 nil "bookmark" "create" name "--quiet")
+    (user-error "Setting tags is not supported by jujutsu")))
+
+;;;; retrieve-tag
+
 (defun vc-jj-retrieve-tag (_dir rev _update)
   "Call jj edit on REV inside DIR.
 REV is the change ID of a jj revision.
@@ -875,62 +1023,77 @@ REV is the change ID of a jj revision.
 _DIR and _UPDATE are as described in the vc.el specification."
   (vc-jj--command-dispatched nil 0 nil "edit" rev "--quiet"))
 
-(defvar vc-jj-pull-history nil
-  "History variable for `vc-jj-pull'.")
+;;; MISCELLANEOUS
 
-(defun vc-jj-pull (prompt)
-  "Pull changes from an upstream repository, invoked via \\[vc-update].
-Normally, this runs \"jj git fetch\".  If PROMPT is non-nil, prompt for
-the jj command to run."
-  (let* ((command (if prompt
-                      (split-string-shell-command
-		       (read-shell-command
-                        (format "jj git fetch command: ")
-                        (concat vc-jj-program " git fetch")
-                        'vc-jj-pull-history))
-                    `(,vc-jj-program "git" "fetch")))
-         (jj-program (car command))
-         (args (cdr command))
-         (root (vc-jj-root default-directory))
-         (buffer (format "*vc-jj : %s*" (expand-file-name root))))
-    (apply #'vc-do-async-command buffer root jj-program args)
-    (vc-jj--set-up-process-buffer buffer root command)))
+;;;; make-version-backups-p
 
-(defvar vc-jj-push-history nil
-  "History variable for `vc-jj-push'.")
+;;;; root
 
-(defun vc-jj-push (prompt)
-  "Push changes to an upstream repository, invoked via \\[vc-push].
-Normally, this runs \"jj git push\".  If PROMPT is non-nil, prompt for
-the command to run, e.g., the semi-standard \"jj git push -c @-\"."
-  (let* ((command (if prompt
-                      (split-string-shell-command
-		       (read-shell-command
-                        (format "jj git push command: ")
-                        (concat vc-jj-program " git push")
-                        'vc-jj-push-history))
-                    `(,vc-jj-program "git" "push")))
-         (jj-program (car command))
-         (args (cdr command))
-         (root (vc-jj-root default-directory))
-         (buffer (format "*vc-jj : %s*" (expand-file-name root))))
-    (apply #'vc-do-async-command buffer root jj-program args)
-    (vc-jj--set-up-process-buffer buffer root command)))
+(defun vc-jj-root (file)
+  "Return the root of the repository containing FILE.
+Return NIL if FILE is not in a jj repository."
+  (vc-find-root file ".jj"))
 
-(defun vc-jj--set-up-process-buffer (buffer root command)
-  (with-current-buffer buffer
-    (vc-run-delayed
-      (vc-compilation-mode 'jj)
-      (setq-local compile-command (string-join command " "))
-      (setq-local compilation-directory root)
-      ;; Either set `compilation-buffer-name-function' locally to nil
-      ;; or use `compilation-arguments' to set `name-function'.
-      ;; See `compilation-buffer-name'.
-      (setq-local compilation-arguments
-                  (list compile-command nil
-                        (lambda (_name-of-mode) buffer)
-                        nil))))
-  (vc-set-async-update buffer))
+;;;; ignore
+
+(defun vc-jj-ignore (file &optional directory remove)
+  "Ignore FILE under DIRECTORY.
+
+FILE is a wildcard specification relative to DIRECTORY.
+DIRECTORY defaults to `default-directory'.
+
+If REMOVE is non-nil, remove FILE from ignored files instead.
+
+For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
+  (vc-default-ignore 'Git file directory remove)
+  (let ((default-directory
+         (if directory (file-name-as-directory directory)
+           default-directory)))
+    (vc-jj--command-dispatched nil 0 file "file" (if remove "track" "untrack") "--")))
+
+;;;; ignore-completion-table
+
+;;;; find-ignore-file
+
+;;;; previous-revision
+
+(defun vc-jj-previous-revision (file rev)
+  "JJ-specific version of `vc-previous-revision'."
+  (if file
+      (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
+                                "-r" (concat "ancestors(" rev ")")
+                                "-T" "change_id"
+                                "--" (vc-jj--filename-to-fileset file))
+    ;; The jj manual states that "for merges, [first_parent] only
+    ;; returns the first parent instead of returning all parents";
+    ;; given the choice, we do want to return the first parent of a
+    ;; merge change.
+    (vc-jj--command-parseable "log" "--no-graph"
+                              "-r" (concat "first_parent(" rev ")")
+                              "-T" "change_id")))
+
+;;;; file-name-changes
+
+;;;; next-revision
+
+(defun vc-jj-next-revision (file rev)
+  "JJ-specific version of `vc-next-revision'."
+  (if file
+      (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
+                                "-r" (concat "descendants(" rev ")")
+                                 "-T" "change_id"
+                                 "--" (vc-jj--filename-to-fileset file))
+    ;; Note: experimentally, jj (as of 0.35.0) prints children in LIFO
+    ;; order (newest child first), but we should not rely on that
+    ;; behavior and since none of the children of a change are
+    ;; special, we return an arbitrary one.
+    (car (vc-jj--process-lines "log" "--no-graph"
+                                 "-r" (concat "children(" rev ")")
+                                 "-T" "change_id ++ \"\n\""))))
+
+;;;; log-edit-mode
+
+;; Set up `log-edit-mode' to handle jj description files.
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.jjdescription\\'" . log-edit-mode))
@@ -947,13 +1110,46 @@ the command to run, e.g., the semi-standard \"jj git push -c @-\"."
                                     (save-buffer)
                                     (kill-buffer)))))
 
-;; Support for vc-region-history via the git version which works fine
-;; at least when co-located with git.
-(defun vc-jj-region-history (file buffer lfrom lto)
-  (vc-git-region-history file buffer lfrom lto))
+;;;; check-headers
 
-(define-derived-mode vc-jj-region-history-mode vc-git-region-history-mode
-  "JJ/Git-Region-History")
+;;;; delete-file
+
+(defun vc-jj-delete-file (file)
+  "Delete FILE and make sure jj registers the change."
+  (when (file-exists-p file)
+    (delete-file file)
+    (vc-jj--command-dispatched nil 0 nil "status")))
+
+;;;; rename-file
+
+(defun vc-jj-rename-file (old new)
+  "Rename file OLD to NEW and make sure jj registers the change."
+  (rename-file old new)
+  (vc-jj--command-dispatched nil 0 nil "status"))
+
+;;;; find-file-hook
+
+;;;; extra-menu
+
+;;;; extra-dir-menu
+
+;;;; conflicted-files
+
+;;;; repository-url
+
+;;;; prepare-patch
+
+;;;; clone
+
+(defun vc-jj-clone (remote directory rev)
+  "Attempt to clone REMOTE repository into DIRECTORY at revision REV.
+On failure, return nil.  Upon success, return DIRECTORY."
+  (let ((successp (ignore-errors
+                    (vc-jj--command-dispatched nil 0 nil "git" "clone" "--colocate" remote directory))))
+    (when (and successp rev)
+      (let ((default-directory directory))
+        (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")))
+    (when successp directory)))
 
 (provide 'vc-jj)
 ;;; vc-jj.el ends here
