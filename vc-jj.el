@@ -83,6 +83,87 @@
   :type 'string
   :risky t)
 
+(defcustom vc-jj-root-log-format
+  (list
+   ;; Log format (passed as the template for "jj log")
+   "
+if(root,
+  format_root_commit(self),
+  label(if(current_working_copy, \"working_copy\"),
+    concat(
+      separate(\" \",
+        change_id ++ \"​\" ++ change_id.shortest(8).prefix() ++ \"​\" ++ change_id.shortest(8).rest(),
+        if(author.name(), author.name(), if(author.email(), author.email().local(), email_placeholder)),
+        commit_timestamp(self).format(\"%Y-%m-%d\"),
+        bookmarks,
+        tags,
+        working_copies,
+        if(git_head, label(\"git_head\", \"git_head()\")),
+        format_short_commit_id(commit_id),
+        if(conflict, label(\"conflict\", \"conflict\")),
+        if(config(\"ui.show-cryptographic-signatures\").as_boolean(),
+          format_short_cryptographic_signature(signature)),
+        if(empty, label(\"empty\", \"(empty)\")),
+        if(description,
+          description.first_line(),
+          label(if(empty, \"empty\"), description_placeholder),
+        ),
+      ) ++ \"\n\",
+    ),
+  )
+)"
+   ;; Log entry regexp
+   (rx
+    line-start
+    ;; Graph
+    (+? nonl) " "
+    ;; Full change ID
+    (group (+ (any "K-Zk-z")))
+    space
+    ;; Visible change ID
+    (group (+ (any "K-Zk-z")))
+    space
+    (group (+ (any "K-Zk-z")))
+    " "
+    ;; Author
+    (group (* nonl)) " "
+    ;; Time
+    (group (= 4 (any num)) "-" (= 2 (any num)) "-" (= 2 (any num)))
+    ;; Tags and  bookmarks
+    (group (*? nonl)) " "
+    ;; Commit ID
+    (group (+ (any hex))) " "
+    ;; Special states
+    (group (opt "conflict "))
+    (group (opt "(empty) "))
+    (group (opt "(no description set)"))
+    ;; Description
+    (* nonl) line-end)
+   ;; Font lock keywords
+   '((1 '(face nil invisible t))        ; Full change ID
+     (2 'log-view-message)              ; Short change ID
+     (3 'change-log-list)               ; Rest of Change ID
+     (4 'change-log-name)               ; Author name
+     (5 'change-log-date)               ; Date
+     (6 'vc-jj-log-view-bookmark)       ; Bookmark names
+     (7 'vc-jj-log-view-commit)         ; Commit ID
+     (8 'vc-conflict-state)             ; Conflict marker
+     (9 'change-log-function)           ; No description marker
+     (10 'change-log-function)))        ; Revision description
+  "JJ log format for `vc-print-root-log'.
+This option determines the format and fontification of the JJ Log View
+buffer created from `vc-print-root-log'.
+
+It should be a list of the form (FORMAT REGEXP KEYWORDS), where FORMAT
+is a format string (a JJ template passed to \"jj log\"), REGEXP is a
+regular expression matching a single entry in the \"jj log\" output, and
+KEYWORDS is a list of font lock keywords (see
+`font-lock-keywords'and `(elisp) Search-based Fontification') for
+highlighting the Log View buffer.
+
+REGEXP may define capture groups that KEYWORDS can use to fontify
+various regions of the Log View buffer.")
+
 (defcustom vc-jj-global-switches '("--no-pager" "--color" "never")
   "Global switches to pass to any jj command."
   :type '(choice (const :tag "None" nil)
@@ -112,6 +193,14 @@ If nil, use the value of `vc-diff-switches'.  If t, use no switches."
 		 (const :tag "None" t)
 		 (string :tag "Argument String")
 		 (repeat :tag "Argument List" :value ("") string)))
+
+(defface vc-jj-log-view-commit
+  '((t :weight light :inherit (shadow italic)))
+  "Face for commit IDs in `vc-jj-log-view-mode' buffers.")
+
+(defface vc-jj-log-view-bookmark
+  '((t :weight bold :inherit log-view-message))
+  "Face for bookmark names in `vc-jj-log-view-mode' buffers.")
 
 ;;; Internal Utilities
 
@@ -612,53 +701,43 @@ the command to run, e.g., the semi-standard \"jj git push -c @-\"."
 
 ;;;; print-log
 
-(defvar vc-jj--log-default-template
-  "
-if(root,
-  format_root_commit(self),
-  label(if(current_working_copy, \"working_copy\"),
-    concat(
-      separate(\" \",
-        change_id.shortest(8).prefix() ++ \"​\" ++ change_id.shortest(8).rest(),
-        if(author.name(), author.name(), if(author.email(), author.email().local(), email_placeholder)),
-        commit_timestamp(self).format(\"%Y-%m-%d\"),
-        bookmarks,
-        tags,
-        working_copies,
-        if(git_head, label(\"git_head\", \"git_head()\")),
-        format_short_commit_id(commit_id),
-        if(conflict, label(\"conflict\", \"conflict\")),
-        if(config(\"ui.show-cryptographic-signatures\").as_boolean(),
-          format_short_cryptographic_signature(signature)),
-        if(empty, label(\"empty\", \"(empty)\")),
-        if(description,
-          description.first_line(),
-          label(if(empty, \"empty\"), description_placeholder),
-        ),
-      ) ++ \"\n\",
-    ),
-  )
-)
-")
-
-(defun vc-jj-print-log (files buffer &optional _shortlog start-revision limit)
-  "Print commit log associated with FILES into specified BUFFER."
-  ;; FIXME: limit can be a revision string, in which case we should
-  ;; print revisions between start-revision and limit
+(defun vc-jj-print-log (files buffer &optional shortlog start-revision limit)
+  "Print commit log associated with FILES into specified BUFFER.
+If SHORTLOG is non-nil, use a short log format similar to
+`vc-jj-root-log-format'.  If START-REVISION is non-nil, it is a string
+of the newest revision in the log to show.  If LIMIT is a number, show
+no more than this many entries.  If LIMIT is a non-empty string, use it
+as a base revision."
   (vc-setup-buffer buffer)
   (let ((inhibit-read-only t)
-        (args (append
-               (and limit
-                    (list "-n" (number-to-string limit)))
-               (if start-revision
-                 (list "-r" (concat "::" start-revision))
-                 (list "-r" "::"))
-               (list "-T" vc-jj--log-default-template "--")
-               (unless (string-equal (vc-jj-root (car files)) (car files))
-                 files))))
+        (files
+         ;; There is a special case when FILES has just the root of
+         ;; the project as its only element (e.g., when calling
+         ;; `vc-print-root-log').  In this case, we do not specify a
+         ;; fileset to jj because doing do would cause the log to only
+         ;; show ancestors of START-REVISION (even if the fileset is
+         ;; "all()").  This behavior is undesirable in
+         ;; `vc-print-root-log' (in a JJ context of bookmarks), since
+         ;; users expect to see descendants as well
+         (unless (file-equal-p (vc-jj-root (car files)) (car files))
+           files))
+        (args (append (pcase limit
+                        ;; When LIMIT is a number, only show up to
+                        ;; that many revisions
+                        ((pred numberp)
+                         (list "-n" (number-to-string limit)
+                               "-r" (concat "::" start-revision)))
+                        ;; When LIMIT is a string, it is a revision.
+                        ;; In that case, show the revisions between
+                        ;; LIMIT and START-REVISION, not including the
+                        ;; revision LIMIT.
+                        ((pred stringp)
+                         (list "-r" (format "%s::%s & ~%s" limit start-revision limit))))
+                      (if shortlog
+                          (list "-T" (car vc-jj-root-log-format))
+                        (list "--no-graph" "-T" "builtin_log_detailed")))))
     (with-current-buffer buffer
-      (apply #'vc-jj--command-dispatched buffer
-        'async nil "log" args))))
+      (apply #'vc-jj--command-dispatched buffer 'async files "log" args))))
 
 ;;;; log-outgoing
 
@@ -682,7 +761,10 @@ if(root,
     ;; graph
     (+? nonl)
     " "
-    ;; change-id
+    ;; full change id
+    (group (+ (any "K-Zk-z")))
+    space
+    ;; displayed change id
     (group (+ (any "K-Zk-z")))
     space
     (group (+ (any "K-Zk-z")))
@@ -705,10 +787,9 @@ if(root,
       (+ (any hex)))
     " "
     ;; special states
-    (? (group (or (: "(empty) ")
-                "")))
-    (? (group (or (: "(no description set)" (* nonl))
-                "")))
+    (group (opt "conflict "))
+    (group (opt "(empty) "))
+    (group (opt "(no description set)"))
     ;; regular description
     (* nonl)
     line-end)
@@ -772,14 +853,14 @@ user first."
            ;; currently on, this means that the bookmark will be moved
            ;; sideways or backwards
            (backwards-move-p
-            (when (not new-bookmark-p)
-              (let* ((bookmark-rev
-                      (car (vc-jj--process-lines "show" bookmark "--no-patch"
-                                                 "-T" "self.change_id().shortest() ++ \"\n\"")))
-                     (bookmark-descendants
-                      (vc-jj--process-lines "log" "--no-graph" "-r" (concat bookmark-rev "..")
-                                            "-T" "self.change_id().shortest() ++ \"\n\"")))
-                (not (member target-rev bookmark-descendants))))))
+            (unless new-bookmark-p
+              ;; If `vc-jj--process-lines' returns nil, then that
+              ;; means the jj command returned no revisions.  This
+              ;; REVSET is the intersection between BOOKMARK, its
+              ;; descendants, and TARGET-REV.  That intersection is
+              ;; non-empty only when TARGET-REV is BOOKMARK or a
+              ;; descendant or BOOKMARK
+              (not (vc-jj--process-lines "log" "-r" (format "%s & %s::" target-rev bookmark))))))
       (when backwards-move-p
         (unless (yes-or-no-p
                  (format-prompt "Moving bookmark %s to revision %s would move it either backwards or sideways. Is this okay?"
@@ -834,25 +915,49 @@ delete."
       (revert-buffer))))
 
 (define-derived-mode vc-jj-log-view-mode log-view-mode "JJ-Log-View"
+  "Log View mode specific for JJ."
   (require 'add-log) ;; We need the faces add-log.
   ;; Don't have file markers, so use impossible regexp.
   (setq-local log-view-file-re regexp-unmatchable)
   (setq-local log-view-per-file-logs nil)
-  (setq-local log-view-message-re vc-jj--logline-re)
+  ;; The `log-view-message-re' is a regexp matching a revision.  Its
+  ;; first match group must match the revision number itself
+  (setq-local log-view-message-re
+              (if (not (memq vc-log-view-type '(long log-search with-diff)))
+                  (cadr vc-jj-root-log-format)
+                (rx bol "Commit ID: " (1+ (any alnum)) "\n"
+                    "Change ID: " (group (1+ (any alpha))))))
   ;; Allow expanding short log entries.
-  (setq truncate-lines t)
-  (setq-local log-view-expanded-log-entry-function
-    'vc-jj--expanded-log-entry)
+  (when (memq vc-log-view-type '(short log-outgoing log-incoming mergebase))
+    (setq truncate-lines t)
+    (setq-local log-view-expanded-log-entry-function 'vc-jj--expanded-log-entry))
+  ;; Fontify according to regexp capture groups (for "short" format
+  ;; log views, the relevant regexp is `vc-jj-root-log-format')
   (setq-local log-view-font-lock-keywords
-    `((,vc-jj--logline-re
-        (1 'log-view-message)
-        (2 'change-log-list)
-        (3 'change-log-name)
-        (4 'change-log-date)
-        (5 'change-log-file)
-        (6 'change-log-list)
-        (7 'change-log-function)
-        (8 'change-log-function))))
+              (if (not (memq vc-log-view-type '(long log-search with-diff)))
+                  (list (cons (nth 1 vc-jj-root-log-format)
+                              (nth 2 vc-jj-root-log-format)))
+                `((,log-view-message-re
+                   (1 'change-log-acknowledgment))
+                  (,(rx bol "Commit ID" (0+ (any space)) ": " (group (1+ (any alnum))) "\n")
+                   (1 'vc-jj-log-view-commit))
+                  (,(rx bol "Bookmarks" (0+ (any space)) ": " (group (1+ not-newline)) "\n")
+                   (1 'vc-jj-log-view-bookmark))
+                  (,(rx bol (or "Author" "Committer") (0+ (any space)) ": "
+                        ;; Name
+                        (group (+? anything))
+                        ;; Email (based on `goto-address-mail-regexp')
+                        (group " <"
+                               (+ (or alnum (any "-=._+")))
+                               "@"
+                               (+ (seq (+ (or alnum (any "-_"))) "."))
+                               (+ alnum)
+                               "> ")
+                        ;; Date and time
+                        "(" (group (+ (or digit space (any "-:")))) ")\n")
+                   (1 'change-log-name)
+                   (2 'change-log-email)
+                   (3 'change-log-date)))))
 
   (keymap-set vc-jj-log-view-mode-map "r" #'vc-jj-log-view-edit-change)
   (keymap-set vc-jj-log-view-mode-map "x" #'vc-jj-log-view-abandon-change)
@@ -881,21 +986,39 @@ delete."
 ;;;; diff
 
 (defun vc-jj-diff (files &optional rev1 rev2 buffer _async)
-  "Display diffs for FILES between revisions REV1 and REV2."
+  "Display diffs for FILES between revisions REV1 and REV2.
+FILES is a list of file paths. REV1 and REV2 are the full change IDs of
+two revisions.  REV1 is the earlier revision and REV2 is the later
+revision.
+
+When BUFFER is non-nil, it is the buffer object or name to insert the
+diff into.  Otherwise, when nil, insert the diff into the *vc-diff*
+buffer. If _ASYNC is non-nil, run asynchronously.  This is currently
+unsupported."
   ;; TODO: handle async
   (setq buffer (get-buffer-create (or buffer "*vc-diff*"))
         files (mapcar #'vc-jj--filename-to-fileset files))
   (cond
    ((not (or rev1 rev2))
-    (setq rev1 "@-"))
+    ;; Use `vc-jj-previous-revision' instead of "@-" because the
+    ;; former handles edge cases like e.g. multiple parents
+    (setq rev1 (vc-jj-previous-revision nil "@")))
    ((null rev1)
     (setq rev1 "root()")))
   (setq rev2 (or rev2 "@"))
   (let ((inhibit-read-only t)
-        (args (append (vc-switches 'jj 'diff) (list "--") files)))
+        ;; When REV1 and REV2 are the same revision, "-f REV1 -t REV2"
+        ;; (erroneously) returns an empty diff.  So we check for that
+        ;; case and use "-r REV1" instead, which returns the correct
+        ;; diff
+        (args (append (if (string= rev1 rev2)
+                          (list "-r" rev1)
+                        (list "-f" rev1 "-t" rev2))
+                      (vc-switches 'jj 'diff)
+                      (list "--") files)))
     (with-current-buffer buffer
       (erase-buffer))
-    (apply #'call-process vc-jj-program nil buffer nil "diff" "--from" rev1 "--to" rev2 args)
+    (apply #'call-process vc-jj-program nil buffer nil "diff" args)
     (if (seq-some (lambda (line) (string-prefix-p "M " line))
                   (apply #'vc-jj--process-lines "diff" "--summary" "--" files))
         1
