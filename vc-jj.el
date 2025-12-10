@@ -4,6 +4,7 @@
 
 ;; Author: Wojciech Siewierski
 ;;         Rudolf Schlatte <rudi@constantly.at>
+;;         Kristoffer Balintona <krisbalintona@gmail.com>
 ;; URL: https://codeberg.org/emacs-jj-vc/vc-jj.el
 ;; Version: 0.4
 ;; Package-Requires: ((emacs "28.1") (compat "29.4"))
@@ -755,45 +756,26 @@ as a base revision."
 
 ;;;; log-view-mode
 
-(defvar vc-jj--logline-re
-  (rx
-    line-start
-    ;; graph
-    (+? nonl)
-    " "
-    ;; full change id
-    (group (+ (any "K-Zk-z")))
-    space
-    ;; displayed change id
-    (group (+ (any "K-Zk-z")))
-    space
-    (group (+ (any "K-Zk-z")))
-    " "
-    ;; author
-    (group (* nonl))
-    " "
-    ;; time
-    (group
-      (= 4 (any num)) "-" (= 2 (any num)) "-" (= 2 (any num)))
-      ;; " "
-      ;; (= 2 (any num)) ":" (= 2 (any num)) ":" (= 2 (any num)))
-    ;; tags, bookmarks, commit-id
-    (group
-      (*? nonl))
-
-    " "
-    ;; commit-id
-    (group
-      (+ (any hex)))
-    " "
-    ;; special states
-    (group (opt "conflict "))
-    (group (opt "(empty) "))
-    (group (opt "(no description set)"))
-    ;; regular description
-    (* nonl)
-    line-end)
-  "Regular expression matching one line in the outpout of 'jj log'.")
+(defun vc-jj-log-view-restore-position ()
+  " Restore the position of point prior to reverting.
+When this function is added to `revert-buffer-restore-functions' in a
+`vc-jj-log-view-mode' buffer, after reverting the buffer, restore the
+position of the point to the revision the point was on prior to
+reverting.  If that revision no longer exists, do not move the point."
+  (when-let* ((rev (log-view-current-tag)))
+    (lambda ()
+      (when (re-search-forward rev nil t)
+        (goto-char (match-beginning 0))
+        (beginning-of-line)
+        ;; Report to the user that we've restored the point, otherwise
+        ;; they might think the buffer was not reverted or that
+        ;; something has gone wrong (because that would likely be the
+        ;; case with the default behavior, without this function)
+        (message "Buffer reverted and point restored to revision %s"
+                 (propertize (vc-jj--command-parseable "show" "--no-patch"
+                                                       "-r" rev
+                                                       "-T" "change_id.shortest()")
+                             'face 'log-view-message))))))
 
 (defun vc-jj--expanded-log-entry (revision)
   "Return a string of the commit details of REVISION.
@@ -810,28 +792,58 @@ Called by `log-view-toggle-entry-display' in a JJ Log View buffer."
      "--no-graph" "-T" "builtin_log_detailed")
     (buffer-string)))
 
+(defvar auto-revert-mode)
+
+;; FIXME 2025-12-07: This only reverts the parent buffer, but there
+;; more often than not multiple files in a project that could be
+;; reverted.  Do we revert those too?  (Note: there is
+;; `vc-auto-revert-mode' in Emacs 31.1.)
 (defun vc-jj--reload-log-buffers ()
-  (and vc-parent-buffer
-    (with-current-buffer vc-parent-buffer
-      (revert-buffer)))
-  (revert-buffer))
+  "Revert the log view buffer and its parent buffer.
+Revert the parent buffer of the current log view buffer then revert the
+log view buffer.
+
+The \"parent buffer\" of the log view buffer is the buffer referenced by
+the variable `vc-parent-buffer'; it is the buffer in which the log view
+buffer was created."
+  (when (derived-mode-p 'vc-jj-log-view-mode)
+    (when vc-parent-buffer
+      (with-current-buffer vc-parent-buffer
+        ;; It's only necessary to ask when `auto-revert-mode' isn't
+        ;; already enabled in the `vc-parent-buffer'.  If it is, then
+        ;; it is safe to assume the user wants that buffer reverted
+        ;; automatically
+        (revert-buffer nil auto-revert-mode)))
+    ;; Revert the log view buffer
+    (revert-buffer)))
 
 (defun vc-jj-log-view-edit-change ()
-  (interactive)
+  "Edit the jj revision at point.
+Call \"jj edit\" on the revision at point."
+  (interactive nil vc-jj-log-view-mode)
   (let ((rev (log-view-current-tag)))
     (vc-jj-retrieve-tag nil rev nil)
     (vc-jj--reload-log-buffers)))
 
 (defun vc-jj-log-view-abandon-change ()
-  (interactive)
-  ;; TODO: should probably ask for confirmation, although this would be
-  ;; different from the cli
+  "Abandon the jj revision at point.
+Call \"jj abandon\" on the revision at point."
+  (interactive nil vc-jj-log-view-mode)
   (let ((rev (log-view-current-tag)))
-    (vc-jj--command-dispatched nil 0 nil "abandon" rev "--quiet")
-    (vc-jj--reload-log-buffers)))
+    (when (y-or-n-p (format "Abandon revision %s?"
+                            (propertize
+                             (vc-jj--command-parseable "show" "--no-patch"
+                                                       "-r" rev
+                                                       "-T" "change_id.shortest()")
+                             'face 'log-view-message)))
+      (vc-jj--command-dispatched nil 0 nil "abandon" rev "--quiet")
+      (vc-jj--reload-log-buffers))))
 
 (defun vc-jj-log-view-new-change ()
-  (interactive)
+  "Create a new, empty change on the revision at point.
+Call \"jj new\", creating a new revision whose parent is the revision at
+point."
+  (interactive nil vc-jj-log-view-mode)
   (let ((rev (log-view-current-tag)))
     (vc-jj--command-dispatched nil 0 nil "new" rev "--quiet")
     (vc-jj--reload-log-buffers)))
@@ -880,8 +892,17 @@ rename."
   (when (derived-mode-p 'vc-jj-log-view-mode)
     (let* ((target-rev (log-view-current-tag))
            (bookmarks-at-rev
-            (vc-jj--process-lines "bookmark" "list" "-r" target-rev
-                                  "-T" "if(!self.remote(), self.name() ++ \"\n\")"))
+            (or (vc-jj--process-lines "bookmark" "list" "-r" target-rev
+                                      "-T" "if(!self.remote(), self.name() ++ \"\n\")")
+                ;; FIXME(KrisB 2025-12-09): Is there a more
+                ;; idiomatic/cleaner way to exit with a message than a
+                ;; `user-error' in the middle of a let binding?
+                (user-error "No bookmarks at %s"
+                            (propertize
+                             (vc-jj--command-parseable "show" "--no-patch"
+                                                       "-r" target-rev
+                                                       "-T" "change_id.shortest()")
+                             'face 'log-view-message))))
            (bookmark-old
             (if (= 1 (length bookmarks-at-rev))
                 (car bookmarks-at-rev)
@@ -914,8 +935,21 @@ delete."
       (apply #'vc-jj--command-dispatched nil 0 nil "--quiet" "bookmark" "delete" bookmarks)
       (revert-buffer))))
 
+(defvar vc-jj-log-view-mode-map
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "r" #'vc-jj-log-view-edit-change)
+    (keymap-set map "x" #'vc-jj-log-view-abandon-change)
+    (keymap-set map "i" #'vc-jj-log-view-new-change)
+    (keymap-set map "b s" #'vc-jj-log-view-bookmark-set)
+    (keymap-set map "b r" #'vc-jj-log-view-bookmark-rename)
+    (keymap-set map "b D" #'vc-jj-log-view-bookmark-delete)
+    map)
+  "Keymap for `vc-jj-log-view-mode'.")
+
 (define-derived-mode vc-jj-log-view-mode log-view-mode "JJ-Log-View"
   "Log View mode specific for JJ."
+  :keymap vc-jj-log-view-mode-map
+
   (require 'add-log) ;; We need the faces add-log.
   ;; Don't have file markers, so use impossible regexp.
   (setq-local log-view-file-re regexp-unmatchable)
@@ -932,7 +966,8 @@ delete."
     (setq truncate-lines t)
     (setq-local log-view-expanded-log-entry-function 'vc-jj--expanded-log-entry))
   ;; Fontify according to regexp capture groups (for "short" format
-  ;; log views, the relevant regexp is `vc-jj-root-log-format')
+  ;; log views, the relevant regexp is found in
+  ;; `vc-jj-root-log-format')
   (setq-local log-view-font-lock-keywords
               (if (not (memq vc-log-view-type '(long log-search with-diff)))
                   (list (cons (nth 1 vc-jj-root-log-format)
@@ -958,13 +993,9 @@ delete."
                    (1 'change-log-name)
                    (2 'change-log-email)
                    (3 'change-log-date)))))
-
-  (keymap-set vc-jj-log-view-mode-map "r" #'vc-jj-log-view-edit-change)
-  (keymap-set vc-jj-log-view-mode-map "x" #'vc-jj-log-view-abandon-change)
-  (keymap-set vc-jj-log-view-mode-map "i" #'vc-jj-log-view-new-change)
-  (keymap-set vc-jj-log-view-mode-map "b s" #'vc-jj-log-view-bookmark-set)
-  (keymap-set vc-jj-log-view-mode-map "b r" #'vc-jj-log-view-bookmark-rename)
-  (keymap-set vc-jj-log-view-mode-map "b D" #'vc-jj-log-view-bookmark-delete))
+  
+  (when (boundp 'revert-buffer-restore-functions) ; Emacs 30.1
+    (add-hook 'revert-buffer-restore-functions #'vc-jj-log-view-restore-position nil t)))
 
 ;;;; show-log-entry
 
@@ -1184,7 +1215,7 @@ For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
   "JJ-specific version of `vc-previous-revision'."
   (if file
       (vc-jj--command-parseable "log" "--no-graph" "--limit" "1"
-                                "-r" (concat "ancestors(" rev ")")
+                                "-r" (format "ancestors(%s) & ~%s" rev rev)
                                 "-T" "change_id"
                                 "--" (vc-jj--filename-to-fileset file))
     ;; The jj manual states that "for merges, [first_parent] only
