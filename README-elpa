@@ -46,6 +46,22 @@
   suggestions in bug reports are fine.
 
 
+1.4 Development
+───────────────
+
+  The code in file `vc-jj.el' is organized according to the structure
+  set out in the preamble of the file `vc.el' in the Emacs source tree.
+
+  Test code coverage can be checked via the [Eldev] tool and [coverage]:
+  run `eldev test --undercover simplecov,dontsend' in the project root
+  directory then activate `coverage-mode' inside `vc-jj.el'.
+
+
+[Eldev] <https://emacs-eldev.github.io/eldev/>
+
+[coverage] <https://github.com/trezona-lecomte/coverage>
+
+
 2 Other Emacs packages for Jujutsu
 ══════════════════════════════════
 
