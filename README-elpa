@@ -174,8 +174,9 @@
   set out in the preamble of the file `vc.el' in the Emacs source tree.
 
   Test code coverage can be checked via the [Eldev] tool and [coverage]:
-  run `eldev test --undercover simplecov,dontsend' in the project root
-  directory then activate `coverage-mode' inside `vc-jj.el'.
+  in a shell, run `eldev test --undercover simplecov,dontsend' in the
+  project root directory, then in Emacs open `vc-jj.el' and activate
+  `coverage-mode'.
 
 
 [Eldev] <https://emacs-eldev.github.io/eldev/>
