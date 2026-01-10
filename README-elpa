@@ -192,6 +192,10 @@
   with more specialized jujutsu support, here are some that might fit
   the bill:
 
+  [0WD0/majutsu]
+        “Majutsu provides a Magit-style interface for Jujutsu (jj),
+        offering an efficient way to interact with JJ repositories from
+        within Emacs.”
   [bolivier/jj-mode.el]
         “Jujutsu version control mode for Emacs inspired by Magit”
   [bennyandresen/jujutsu.el]
@@ -200,6 +204,8 @@
   [~puercopop/jujutsushi]
         “A emacs interface to jujutsu”
 
+
+[0WD0/majutsu] <https://github.com/0WD0/majutsu>
 
 [bolivier/jj-mode.el] <https://github.com/bolivier/jj-mode.el>
 
