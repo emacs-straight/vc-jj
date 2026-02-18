@@ -19,6 +19,9 @@
 1.1.4 Fixed
 ╌╌╌╌╌╌╌╌╌╌╌
 
+  • Fixed a bug where the contents of ​*vc-diff​* were not erased prior to
+    invocations of `vc-jj-diff'.
+
 
 1.2 [0.5] - 2025-12-21
 ──────────────────────
@@ -119,5 +122,4 @@
     intended, but was a consequence of letting errors escape from
     `vc-jj-dir-status-files'.
   • Properly handle cases where directory file paths are passed to
-    vc-jj's `vc-jj--filename-to-fileset', which vc-jj uses to transform
   …  …
