@@ -209,7 +209,9 @@
         “An Emacs interface for jujutsu, inspired by magit and humbly
         not attempting to match it in scope.”
   [~puercopop/jujutsushi]
-        “A emacs interface to Jujutsu”
+        “An Emacs UI to jujutsu”
+  [Xylenox/majjic]
+        “jjui + magit-section inspired jj ui for Emacs”
 
 
 [0WD0/majutsu] <https://github.com/0WD0/majutsu>
@@ -219,3 +221,5 @@
 [bennyandresen/jujutsu.el] <https://github.com/bennyandresen/jujutsu.el>
 
 [~puercopop/jujutsushi] <https://git.sr.ht/~puercopop/jujutsushi>
+
+[Xylenox/majjic] <https://github.com/Xylenox/majjic>
