@@ -392,118 +392,251 @@ Return non-nil when FILE is file tracked by JJ and nil when not."
 
 ;;;; state
 
-(defun vc-jj-state (file)
-  "JJ implementation of `vc-state' for FILE.
-There are several file states recognized by vc (see the docstring of
-`vc-state' for the full list).  Several of these are relevant to
-jujutsu.  They are:
-- Added (new file)
-- Removed (deleted file)
-- Edited (modified file)
-- Up-to-date (unmodified file)
-- Conflict (merge conflict)
-- Ignored (ignored by repository)
+(defconst vc-jj--conflict-aware-file-list-template
+  "if(self.conflict(), 'C', 'T') ++ ' ' ++ self.path() ++ '\n'"
+  "Template for outputting a file list with conflict information.
+This template is intended as the value of the \"-T\" argument passed to
+\"jj file list\".  It is meant to be used in conjunction with
+`vc-jj--parse-conflict-aware-file-table'.")
 
-Other VCS backends would also recognize the \"unregistered\" state, but
-there is no such state in jj since jj automatically registers new files."
-  ;; We can deduce all of the vc states listed above with two
-  ;; commands:
-  ;;
-  ;; - "jj diff --summary FILE" gets us the "added" state (when output
-  ;;   starts with "A "), the "removed" state (when output starts with
-  ;;   "D ") and "edited" state (when output starts with "M ").  No
-  ;;   output is also possible (this could mean the "conflict",
-  ;;   "ignored" or "unchanged" state), so we deduce these with the
-  ;;   next command:
-  ;;
-  ;; - "jj file list -T 'conflict' FILE" prints "true" when the file
-  ;;   is in "conflict" state, prints an empty string when the file is
-  ;;   in "ignored" state, and "false" for any other state -- but most
-  ;;   of these are already covered by the previous command, so we
-  ;;   deduce "up-to-date".
-  (let* ((default-directory (vc-jj-root file))
-         (changed (vc-jj--command-parseable file "diff" "--summary")))
-    (cond
-     ((string-prefix-p "A " changed) 'added)
-     ((string-prefix-p "D " changed) 'removed)
-     ((string-prefix-p "M " changed) 'edited)
-     (t (let ((conflicted-ignored
-               (vc-jj--command-parseable file "file" "list" "-T" "conflict")))
-          (cond
-           ((string= conflicted-ignored "true") 'conflict)
-           ((string-empty-p conflicted-ignored) 'ignored)
-           ;; If the file hasn't matched anything yet, this leaves
-           ;; only one possible state: up-to-date
-           ((string= conflicted-ignored "false") 'up-to-date)
-           (t
-            (warn "VC state of %s is not recognized, assuming up-to-date" file)
-            'up-to-date)))))))
+(defun vc-jj--parse-conflict-aware-file-table (lines)
+  "Return a hash table of tracked files with information on conflicted state.
+The returned table maps FILE to CONFLICTEDP, where FILE is a tracked
+file and CONFLICTEDP is t if that file is in a conflicted state.  This
+table helps deduce whether a given file is tracked and whether it is
+conflicted.
+
+LINES is a list of strings, where each string is a line of the output of
+\"jj file list\" with a template of
+`vc-jj--conflict-aware-file-list-template', which shows a list of all
+tracked files, with each path prepended with \"C\" or \"T\" depending on
+its conflict state."
+  (let ((table (make-hash-table :test #'equal)))
+    (mapc (lambda (line)
+            (puthash (substring line 2) (eq ?C (aref line 0)) table))
+          lines)
+    table))
+
+(defun vc-jj--parse-diff-types-file-table (lines)
+  "Return a hash table of changed files with their diff types.
+The returned table maps FILE to TYPES, where FILE is a changed file and
+TYPES is a two-character string indicating the before and after types of
+that file.  See `vc-jj--deduce-state-from-diff-types' for which VC
+states can be deduced from this two-character string.
+
+LINES is a list of strings, where each string is a line of the output of
+\"jj diff --types\", which shows a list of all changed files, with each
+path prepended with a two-character type string indicating the before
+and after types of the file."
+  (let ((table (make-hash-table :test #'equal)))
+    (mapc (lambda (line)
+            (puthash (substring line 3) (substring line 0 2) table))
+          lines)
+    table))
+
+(defun vc-jj--deduce-state-from-diff-types (diff-types)
+  "Return the file state deduced from DIFF-TYPES.
+DIFF-TYPES is either nil or a two-character string at the beginning of
+each line in of \"jj diff --types\".  See \"jj diff --help\" for a list
+of all possible characters and their meanings.
+
+When DIFF-TYPES is nil, return nil.  When it is a two-character string,
+return a symbol representing the VC state deduced from DIFF-TYPES.  The
+possible state symbols returned are:
+- \\='conflict
+- \\='added
+- \\='removed
+- \\='edited
+See `vc-jj-state' for a list of all VC states relevant to Jujutsu.
+
+Please note that the conflict state is only partially deduced by this
+function: \"jj diff\" reports a conflict only when the conflict
+originates in the working copy, not if the conflict originates in an
+earlier revision.  To definitively determine the conflict state of a
+file, something like \"jj file list -T \\='self.conflict()\\='\" should
+be used (see `vc-jj--parse-conflict-aware-file-table'.)"
+  (when diff-types
+    (let ((before (aref diff-types 0))
+          (after (aref diff-types 1)))
+      (cond ((eq ?C after) 'conflict)
+            ((eq ?- before) 'added)
+            ((eq ?- after) 'removed)
+            ((and (memq before '(?F ?L ?G)) (memq after  '(?F ?L ?G)))
+             'edited)
+            (t (error "vc-jj: Unexpected diff types string: %s" diff-types))))))
+
+(defun vc-jj--deduce-state (file file-diff-types-table file-conflict-table)
+  "Deduce the VC state of FILE from already parsed jj output.
+Return a symbol corresponding to the VC state of FILE.  See
+`vc-jj-state' for the possible VC state symbols.
+
+FILE is a path relative to the repository root.  FILE-DIFF-TYPES-TABLE
+is a hash table produced by `vc-jj--parse-diff-types-file-table'.
+FILE-CONFLICT-TABLE is a hash table produced by
+`vc-jj--parse-conflict-aware-file-table'.  Together,
+FILE-DIFF-TYPES-TABLE and FILE-CONFLICT-TABLE suffice to deduce the VC
+state of FILE.
+
+Note that since FILE-DIFF-TYPES-TABLE should be produced by
+`vc-jj--parse-diff-types-file-table', FILE-DIFF-TYPES-TABLE will only
+contain file entries for files with changes in the working copy.  On the
+other hand, since FILE-CONFLICT-TABLE should be produced by
+`vc-jj--parse-conflict-aware-file-table', FILE-CONFLICT-TABLE will only
+contain file entries for tracked files.
+
+To avoid unnecessary computation, calls to
+`vc-jj--parse-diff-types-file-table' and
+`vc-jj--parse-conflict-aware-file-table' can be passed jj output
+specific to FILE.  As an example for
+`vc-jj--parse-diff-types-file-table',
+
+  (vc-jj--process-lines FILE \"diff\" \"--types\")"
+  ;; We use hash tables rather than e.g. alists for the sake of
+  ;; performance: table lookups are O(1) whereas list lookups are O(n)
+  (let* ((diff-types (gethash file file-diff-types-table))
+         (diff-types-state (vc-jj--deduce-state-from-diff-types diff-types)))
+    (or
+     ;; DIFF-TYPES-STATE definitely deduces the edited, removed, and
+     ;; added states, as well as the conflict state when the conflict
+     ;; originates in the working copy
+     diff-types-state
+     ;; When DIFF-TYPES-STATE is nil (i.e., FILE has no changes in the
+     ;; working copy), use `file-conflict-table' to distinguish
+     ;; between the ignored, up-to-date, and conflict states.  (The
+     ;; conflict state can only be caught by DIFF-TYPES-STATE when the
+     ;; conflict originates in the working copy; `file-conflict-table'
+     ;; catches when a conflict originates in an earlier revision.)
+     (let ((conflictp (gethash file file-conflict-table 'not-tracked)))
+       (cond ((eq conflictp 'not-tracked) 'ignored)
+             (conflictp 'conflict)
+             (t 'up-to-date))))))
+
+(defun vc-jj-state (file)
+  "Return VC state symbol of FILE.
+There are several file states recognized by VC (see the docstring of
+`vc-state' for the full list).  Only several of these are relevant to
+Jujutsu.  They are:
+- \\='added (new file)
+- \\='removed (deleted file)
+- \\='edited (modified file)
+- \\='conflict (merge conflict)
+- \\='up-to-date (unmodified file)
+- \\='ignored (ignored by repository)
+Other VC backends would also recognize the \"unregistered\" state, but
+there is no such state in Jujutsu since Jujutsu automatically registers
+new files."
+  ;; TODO 2026-03-22: Ideally, we would only call one jj command, or
+  ;; only call a second one when necessary (instead of calling two
+  ;; commands always).  If, in the future, jj provides templates that
+  ;; make this possible, then this function, its helpers, and
+  ;; `vc-jj-dir-status-files' should be refactored
+  (let* ((root (vc-jj-root file))
+         (file (file-relative-name file root))
+         (default-directory root)
+         (file-diff-types-table
+          (vc-jj--parse-diff-types-file-table
+           (vc-jj--process-lines file "diff" "--types")))
+         (file-conflict-table
+          (vc-jj--parse-conflict-aware-file-table
+           (vc-jj--process-lines file "file" "list"
+                                 "-T" vc-jj--conflict-aware-file-list-template))))
+    (vc-jj--deduce-state file file-diff-types-table file-conflict-table)))
 
 ;;;; dir-status-file
 
-(defun vc-jj-dir-status-files (dir _files update-function)
-  "Calculate a list of (FILE STATE EXTRA) entries for DIR.
-Return the result of applying UPDATE-FUNCTION to that list.
+;; 2026-03-22(Kris B): As far as I've seen, DIR is always the
+;; repository root.  The dir-status-files specification in the
+;; preamble of vc.el does not make it clear, but this seems to be the
+;; case.
+(defun vc-jj-dir-status-files (root-or-subdir files update-function)
+  "Call UPDATE-FUNCTION on a computed list of entries for ROOT-OR-SUBDIR.
+Compute a list of entries for ROOT-OR-SUBDIR whose elements are of the
+form (FILE STATE EXTRA), where FILE is relative to ROOT-OR-SUBDIR, STATE
+is a VC state symbol.  Return the result of calling UPDATE-FUNCTION with
+that list as an argument.
 
-For a description of the states relevant to jj, see `vc-jj-state'."
-  ;; This function is specified below the STATE-QUERYING FUNCTIONS
-  ;; header in the comments at the beginning of vc.el.  The
-  ;; specification says the 'dir-status-files' backend function
-  ;; returns "a list of lists ... for FILES in DIR", which does not
-  ;; say anything about subdirectories.  We follow the example of
-  ;; 'vc-git' and return the state of files in subdirectories of DIR
-  ;; as well (except for ignored files, since we don't want to cons up
-  ;; a list of every file below DIR).
-  ;;
-  ;; Unfortunately this function needs to do a lot of work:
-  ;; - There is no single jj command that gives us all the info we
-  ;;   need, so we cannot run asynchronously.
-  ;; - jj prints filenames relative to the repository root, while we
-  ;;   need them relative to DIR.
-  ;;
-  ;; TODO: we should use hash tables, since we're doing a lot of set
-  ;; operations, which are slow on lists.
-  (with-demoted-errors "JJ error during `vc-dir-status-files': %S"
-    (let* ((dir (expand-file-name dir))
-           (default-directory dir)
-           (project-root (vc-jj-root dir))
-           (registered-files (vc-jj--process-lines dir "file" "list"))
-           (ignored-files (seq-difference (cl-delete-if #'file-directory-p
-                                                        (directory-files dir nil nil t))
-                                          registered-files))
-           (changed (vc-jj--process-lines dir "diff" "--summary"))
-           (added-files (mapcan (lambda (entry)
-                                  (and (string-prefix-p "A " entry)
-                                       (list (substring entry 2))))
-                                changed))
-           (removed-files (mapcan (lambda (entry)
-                                    (and (string-prefix-p "D " entry)
-                                         (list (substring entry 2))))
-                                  changed))
-           (edited-files (mapcan (lambda (entry)
-                                     (and (string-prefix-p "M " entry)
-                                          (list (substring entry 2))))
-                                   changed))
-           ;; The command below only prints conflicted files in DIR, but
-           ;; relative to project-root, hence the dance with
-           ;; expand-file-name / file-relative-name
-           (conflicted-files (mapcar (lambda (entry)
-                                       (file-relative-name (expand-file-name entry project-root) dir))
-                                     (vc-jj--process-lines dir "file" "list"
-                                                           "-T" "if(conflict, path ++ '\n')")))
-           (up-to-date-files (cl-remove-if (lambda (entry) (or (member entry conflicted-files)
-                                                              (member entry edited-files)
-                                                              (member entry added-files)
-                                                              (member entry ignored-files)))
-                                          registered-files))
-           (result
-            (nconc (mapcar (lambda (entry) (list entry 'conflict)) conflicted-files)
-                   (mapcar (lambda (entry) (list entry 'added)) added-files)
-                   (mapcar (lambda (entry) (list entry 'removed)) removed-files)
-                   (mapcar (lambda (entry) (list entry 'edited)) edited-files)
-                   (mapcar (lambda (entry) (list entry 'ignored)) ignored-files)
-                   (mapcar (lambda (entry) (list entry 'up-to-date)) up-to-date-files))))
-      (funcall update-function result nil))))
+FILES is either nil or a list of files relative to ROOT-OR-SUBDIR.  If
+FILES is nil, return the state of all files that don't have the
+\\='up-to-date or \\='ignored states (i.e., only files in the \\='added,
+\\='removed, \\='edited, or \\='conflict states).  If FILES is non-nil,
+return the state of all FILES, regardless of their state.
+
+ROOT-OR-SUBDIR is the repository root or a subdirectory of the
+repository.
+
+For a description of the states relevant to Jujutsu, see the docstring
+of `vc-jj-state'."
+  (condition-case err
+      ;; A big consideration of this function is performance in large
+      ;; repositories: minimize the number of operations and loops
+      ;; over lists
+      (let* ((root (vc-jj-root root-or-subdir))
+             (default-directory root)
+             (file-diff-types-table
+              (vc-jj--parse-diff-types-file-table
+               (vc-jj--process-lines root-or-subdir "diff" "--types")))
+             (file-conflict-table
+              (vc-jj--parse-conflict-aware-file-table
+               (vc-jj--process-lines root-or-subdir "file" "list"
+                                     "-T" vc-jj--conflict-aware-file-list-template)))
+             (files-to-report
+              (if files
+                  ;; When FILES is non-nil, report on all FILES
+                  ;; regardless of state.
+                  (mapcar (lambda (f)
+                            ;; Make all file paths relative to ROOT
+                            ;; since the paths stored in
+                            ;; `vc-jj--deduce-state' (see below) are
+                            ;; relative to the project root
+                            (file-relative-name (file-name-concat root-or-subdir f) root))
+                          files)
+                ;; When FILES is nil, report only on files that are in
+                ;; the edited, added, removed, or conflict state
+                ;; (i.e., not the up-to-date or ignored states).
+                ;;
+                ;; Our strategy: we get all files in
+                ;; FILE-DIFF-TYPES-TABLE (files not in that table are
+                ;; ignored or up-to-date) plus files with conflicts
+                ;; that originate in an earlier revision (keys in
+                ;; FILE-CONFLICT-TABLE with a non-nil value).
+                (let (result)
+                  (maphash (lambda (k _) (push k result)) file-diff-types-table)
+                  (maphash (lambda (k v)
+                             (when (and v
+                                        ;; Don't push duplicates of
+                                        ;; conflicted files to RESULT.
+                                        ;; Doing it this way avoids
+                                        ;; having to de-duplicate
+                                        ;; RESULTS later by looping
+                                        ;; the list
+                                        (not (gethash k file-diff-types-table)))
+                               (push k result)))
+                           file-conflict-table)
+                  result)))
+             (result
+              (mapcar (lambda (root-rel-file)
+                        (let (;; The files reported should be relative
+                              ;; to ROOT-OR-SUBDIR
+                              (display-path (file-relative-name root-rel-file root-or-subdir))
+                              (state (vc-jj--deduce-state root-rel-file
+                                                          file-diff-types-table
+                                                          file-conflict-table)))
+                          (list display-path state)))
+                      files-to-report)))
+        (funcall update-function result nil))
+    ;; FIXME 2026-03-24(Kris B): Is there a cleaner way to deal with
+    ;; repository corruption errors?  This solution seems a bit
+    ;; fragile and ad hoc...
+    ;;
+    ;; For errors related to repository corruption (jj emits an exit
+    ;; code of 255), report on no files and warn the user about a
+    ;; potential problem.  (See bug#63.) Signal other errors normally.
+    (error (if (string-match-p "exited with status 255" (error-message-string err))
+               (progn
+                 (warn "Vc-jj: jj failed, possibly due to a corrupted repository (%s)"
+                       (vc-jj-root root-or-subdir))
+                 (funcall update-function nil nil))
+             (signal (car err) (cdr err))))))
 
 ;;;; dir-extra-headers
 
@@ -1117,17 +1250,16 @@ delete."
 
 ;;;; diff
 
-(defun vc-jj-diff (files &optional rev1 rev2 buffer _async)
-  "Display diffs for FILES between revisions REV1 and REV2.
+(defun vc-jj-diff (files &optional rev1 rev2 buffer async)
+  "Display a diff for FILES between revisions REV1 and REV2.
 FILES is a list of file paths.  REV1 and REV2 are the full change IDs of
 two revisions.  REV1 is the earlier revision and REV2 is the later
 revision.
 
 When BUFFER is non-nil, it is the buffer object or name to insert the
 diff into.  Otherwise, when nil, insert the diff into the *vc-diff*
-buffer.  If _ASYNC is non-nil, run asynchronously.  This is currently
-unsupported."
-  ;; TODO: handle async
+buffer.  If ASYNC is non-nil, run the jj command of this function
+asynchronously."
   (setq buffer (or buffer "*vc-diff*")
         files (mapcar #'vc-jj--filename-to-fileset files))
   (cond
@@ -1148,7 +1280,7 @@ unsupported."
                         (list "-f" rev1 "-t" rev2))
                       (vc-switches 'jj 'diff)
                       (list "--") files)))
-    ;; Match `vc-git-diff' by returning the value of
+    ;; Mimic `vc-git-diff' by returning the value of
     ;; `vc-jj--command-dispatched'.
     ;;
     ;; Also ensure that (vc-jj--command-dispatched BUFFER ...) is
@@ -1158,9 +1290,10 @@ unsupported."
     ;; `vc-jj--command-dispatched') only erases BUFFER when BUFFER is
     ;; not the current buffer.  See bug#152 for more information.
     (prog1
-        (apply #'vc-jj--command-dispatched buffer 0 nil "diff" args)
+        (apply #'vc-jj--command-dispatched buffer (if async 'async 0) nil "diff" args)
       (with-current-buffer buffer
-        (ansi-color-filter-region (point-min) (point-max))))))
+        (vc-run-delayed
+          (ansi-color-filter-region (point-min) (point-max)))))))
 
 ;;;; revision-completion-table
 
