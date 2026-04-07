@@ -10,6 +10,9 @@
   • Added support for `vc-log-search'.
   • Added support for asynchronous `vc-diff'.  (Supported only on Emacs
     >=31, which has the `vc-allow-async-diff' user option.)
+  • Added support for asynchronous `vc-checkin', effecting
+    `vc-next-action' when making commits.  (Supported only on Emacs
+    >=31, which has the `vc-async-checkin' user option.)
 
 
 1.1.2 Changed
@@ -114,8 +117,5 @@
   • Added several commands to manipulate bookmarks in
     `vc-jj-log-view-mode': `vc-jj-bookmark-set',
     `vc-jj-bookmark-delete', and `vc-jj-bookmark-rename'.  These have
-    bindings under the "b" prefix key in `vc-jj-log-view-mode': `vc'
-    buffers.
-  • Added list of other jj support packages for Emacs to the
-    documentation – not everyone is looking for vc integration :)
+    bindings under the "b" prefix key
   …  …

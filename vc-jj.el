@@ -745,7 +745,9 @@ parents.map(|c| concat(
     ;; want will be printed afterwards.
     (car (last (vc-jj--process-lines nil "log" "--no-graph"
                                      "-r" "@"
-                                     "-T" "change_id ++ '\n'")))))
+                                     "-T" (if (bound-and-true-p vc-use-short-revision)
+                                              "self.change_id().shortest() ++ '\n'"
+                                            "self.change_id() ++ '\n'"))))))
 
 ;;;; checkout-model
 
@@ -802,13 +804,50 @@ parents.map(|c| concat(
 ;;;; unregister
 
 ;;;; checkin
+;; See also the related 'async-checkins' and 'checkin-patch' methods
 
 (defun vc-jj-checkin (files comment &optional _rev)
-  "Run \"jj commit\" with supplied FILES and COMMENT."
-  (let* ((comment (car (log-edit-extract-headers () comment)))
+  "Create a new change from FILES.
+Run \"jj commit\" on FILES with a change description provided in
+COMMENT.
+
+FILES is a list of repository files or subdirectories to check in.
+COMMENT is a change comment (i.e., the content of a log edit buffer,
+which contains all log edit headers).
+
+Also see the `vc-async-checkin' user option (available in Emacs 31),
+which, when non-nil, makes the jj command of this function run
+asynchronously."
+  (let* ((description
+          ;; 2026-04-05 TODO: We do not use any comment headers aside
+          ;; from the assumed "Summary" header.  If in the future
+          ;; vc-jj uses additional headers, then we will need to
+          ;; extract those headers from COMMENT.
+          (car (log-edit-extract-headers nil comment)))
          (args (append (vc-switches 'jj 'checkin)
-                       (list "commit" "-m" comment))))
-    (apply #'vc-jj--command-dispatched nil 0 files args)))
+                       (list "commit" "-m" description))))
+    (if (and (bound-and-true-p vc-async-checkin) ; Emacs 31 option
+             (vc-jj-async-checkins))
+        (let* ((file1 (or (car files) default-directory))
+               (root (vc-jj-root file1))
+               (buffer (format "*vc-jj : %s*" root))
+               (proc (apply #'vc-do-async-command ; Returns process object
+                            buffer root vc-jj-program
+                            (append (ensure-list vc-jj-global-switches)
+                                    args
+                                    (mapcar #'vc-jj--filename-to-fileset files)))))
+          ;; The following lines are in `vc-git--checkin', so we do
+          ;; the same
+          (set-process-query-on-exit-flag proc t)
+          (vc-wait-for-process-before-save proc "Finishing checking in files...")
+          (with-current-buffer buffer
+            (vc-run-delayed (vc-compilation-mode 'jj)))
+          (vc-set-async-update buffer)
+          ;; When `vc-async-checkin' is non-nil, `vc-checkin' expects
+          ;; this function to return a list whose car is 'async' and
+          ;; whose cdr is the jj process object
+          (list 'async proc))
+      (apply #'vc-jj--command-dispatched nil 0 files args))))
 
 ;;;; checkin-patch
 
@@ -898,7 +937,7 @@ push\")."
   "Return the description of REV.
 _FILES currently has no effect on this function."
   (vc-jj--command-parseable nil "show" "--no-patch"
-                            "-r" rev "-T" "description"))
+                            rev "-T" "description"))
 
 ;;;; modify-change-comment
 
@@ -1018,8 +1057,7 @@ reverting.  If that revision no longer exists, do not move the point."
         ;; something has gone wrong (because that would likely be the
         ;; case with the default behavior, without this function)
         (message "Buffer reverted and point restored to revision %s"
-                 (propertize (vc-jj--command-parseable nil "show" "--no-patch"
-                                                       "-r" rev
+                 (propertize (vc-jj--command-parseable nil "show" "--no-patch" rev
                                                        "-T" "change_id.shortest()")
                              'face 'log-view-message))))))
 
@@ -1076,8 +1114,7 @@ Call \"jj abandon\" on the revision at point."
   (let ((rev (log-view-current-tag)))
     (when (y-or-n-p (format "Abandon revision %s?"
                             (propertize
-                             (vc-jj--command-parseable nil "show" "--no-patch"
-                                                       "-r" rev
+                             (vc-jj--command-parseable nil "show" "--no-patch" rev
                                                        "-T" "change_id.shortest()")
                              'face 'log-view-message)))
       (vc-jj-delete-revision rev)
@@ -1140,8 +1177,7 @@ rename."
                                       "-T" "if(!self.remote(), self.name() ++ '\n')")
                 (user-error "No bookmarks at %s"
                             (propertize
-                             (vc-jj--command-parseable nil "show" "--no-patch"
-                                                       "-r" target-rev
+                             (vc-jj--command-parseable nil "show" "--no-patch" target-rev
                                                        "-T" "change_id.shortest()")
                              'face 'log-view-message))))
            (bookmark-old
@@ -1149,7 +1185,8 @@ rename."
                 (car bookmarks-at-rev)
               (completing-read "Which bookmark to rename? " bookmarks-at-rev)))
            (bookmark-new
-            (read-string (format-prompt "Rename %s to" nil bookmark-old))))
+            (read-string (format-prompt "Rename %s to" nil bookmark-old)
+                         nil t bookmark-old)))
       (vc-jj--command-dispatched nil 0 nil "bookmark" "rename" bookmark-old bookmark-new
                                  "--quiet")
       (revert-buffer))))
@@ -1166,7 +1203,7 @@ delete."
            (revision-bookmarks
             (string-split
              (vc-jj--command-parseable
-              nil "show" "-r" rev "--no-patch"
+              nil "show" "--no-patch" rev
               "-T" "self.local_bookmarks().map(|b| b.name()) ++ '\n'")
              " " t "\n"))
            (bookmarks
@@ -1188,10 +1225,7 @@ delete."
   "Keymap for `vc-jj-log-view-mode'.")
 
 (define-derived-mode vc-jj-log-view-mode log-view-mode "JJ-Log-View"
-  "Log View major mode specific for Jujutsu logs.
-The following keybindings are available, with several specific to a
-Jujutsu workflow:
-\\{vc-jj-log-view-mode-map}"
+  "Log View mode specific for JJ."
   :keymap vc-jj-log-view-mode-map
 
   (require 'add-log) ;; We need the faces add-log.
@@ -1492,17 +1526,20 @@ For jj, modify `.gitignore' and call `jj untrack' or `jj track'."
   "JJ-specific version of `vc-previous-revision'.
 Return the revision number that precedes REV for FILE, or nil if no such
 revision exists."
-  (if file
-      (vc-jj--command-parseable file "log" "--no-graph" "--limit" "1"
-                                "-r" (format "ancestors(%s) & ~%s" rev rev)
-                                "-T" "change_id")
-    ;; The jj manual states that "for merges, [first_parent] only
-    ;; returns the first parent instead of returning all parents";
-    ;; given the choice, we do want to return the first parent of a
-    ;; merge change.
-    (vc-jj--command-parseable nil "log" "--no-graph"
-                              "-r" (concat "first_parent(" rev ")")
-                              "-T" "change_id")))
+  (let ((template (if (bound-and-true-p vc-use-short-revision)
+                      "self.change_id().shortest()"
+                    "self.change_id()")))
+    (if file
+        (vc-jj--command-parseable file "log" "--no-graph" "--limit" "1"
+                                  "-r" (format "ancestors(%s) & ~%s" rev rev)
+                                  "-T" template)
+      ;; The jj manual states that "for merges, [first_parent] only
+      ;; returns the first parent instead of returning all parents";
+      ;; given the choice, we do want to return the first parent of a
+      ;; merge change.
+      (vc-jj--command-parseable nil "log" "--no-graph"
+                                "-r" (concat "first_parent(" rev ")")
+                                "-T" template))))
 
 ;;;; file-name-changes
 
@@ -1512,17 +1549,20 @@ revision exists."
   "JJ-specific version of `vc-next-revision'.
 Return the revision that follows REV for FILE, or nil if no such
 revision exists."
-  (if file
-      (vc-jj--command-parseable file "log" "--no-graph" "--limit" "1"
-                                "-r" (concat "descendants(" rev ")")
-                                "-T" "change_id")
-    ;; Note: experimentally, jj (as of 0.35.0) prints children in LIFO
-    ;; order (newest child first), but we should not rely on that
-    ;; behavior and since none of the children of a change are
-    ;; special, we return an arbitrary one.
-    (car (vc-jj--process-lines nil "log" "--no-graph"
-                               "-r" (concat "children(" rev ")")
-                               "-T" "change_id ++ '\n'"))))
+  (let ((template (if (bound-and-true-p vc-use-short-revision)
+                      "self.change_id().shortest()"
+                    "self.change_id()")))
+    (if file
+        (vc-jj--command-parseable file "log" "--no-graph" "--limit" "1"
+                                  "-r" (concat "descendants(" rev ")")
+                                  "-T" template)
+      ;; Note: experimentally, jj (as of 0.35.0) prints children in
+      ;; LIFO order (newest child first), but we should not rely on
+      ;; that behavior and since none of the children of a change are
+      ;; special, we return an arbitrary one.
+      (vc-jj--command-parseable nil "log" "--no-graph" "--limit" "1"
+                                "-r" (concat "children(" rev ")")
+                                "-T" template))))
 
 ;;;; log-edit-mode
 
