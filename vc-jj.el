@@ -241,120 +241,137 @@ repository root (e.g., via `let') before calling this function.
 `default-directory'.)"
   (format "root:%S" (file-relative-name filename default-directory)))
 
-(defun vc-jj--set-up-process-buffer (buffer root command)
-  "Prepare BUFFER for execution of COMMAND in directory ROOT."
-  (with-current-buffer buffer
-    (vc-run-delayed
-      (vc-compilation-mode 'jj)
-      (setq-local compile-command (string-join command " "))
-      (setq-local compilation-directory root)
-      ;; Either set `compilation-buffer-name-function' locally to nil
-      ;; or use `compilation-arguments' to set `name-function'.
-      ;; See `compilation-buffer-name'.
-      (setq-local compilation-arguments
-                  (list compile-command nil
-                        (lambda (_name-of-mode) buffer)
-                        nil))
-      (ansi-color-filter-region (point-min) (point-max))))
-  (vc-set-async-update buffer))
+(defun vc-jj--call (infile buffer &rest args)
+  "Run jj with ARGS, sending the result to BUFFER.
+INFILE and BUFFER are as described in `process-file'.  Return the
+process exit status.
+
+The value of `vc-jj-global-switches' is prepended to ARGS.
+
+The process runs in `default-directory'.  The caller is responsible for
+setting it to the repository root before calling this function.  When
+`default-directory' is a remote path, `process-file' will invoke the
+appropriate file name handler (e.g., TRAMP), so this function works
+correctly with remote repositories.
+
+This function is the subroutine underlying all non-user-facing vc-jj
+process functions, that is, all functions that do not involve calling
+`vc-do-command'."
+  ;; This function is based on `vc-git--call'
+  (let (;; Enable `inhibit-null-byte-detection', otherwise Tramp's EOL
+        ;; conversion might get confused
+        (inhibit-null-byte-detection t)
+        (coding-system-for-read (or coding-system-for-read 'utf-8))
+        (coding-system-for-write (or coding-system-for-write 'utf-8)))
+    ;; `process-file' works with remote paths (via TRAMP file
+    ;; handlers), whereas `call-process' is not
+    (apply #'process-file vc-jj-program infile buffer nil
+           (append vc-jj-global-switches args))))
 
 (defun vc-jj--process-lines (file-or-list &rest args)
   "Run jj with FILE-OR-LIST and ARGS, returning stdout as a list of strings.
-Return the process\\='s stdout as a list of strings, one string for
-every line in stdout, with ANSI escape sequences removed from each
-string.  An error is signaled if jj exits with a non-zero status.
+Return the process's stdout as a list of strings, one string for every
+line in stdout, with ANSI escape sequences removed from each string.  An
+error is signaled if jj exits with a non-zero status.
 
 All stderr is discarded (since jj prints warnings to stderr even when
-run with '--quiet').  As a result, the returned strings are safe for
-parsing.
+run with \"--quiet\" option).  As a result, the returned strings are
+safe for parsing.
 
-Unlike `vc-jj--command-dispatched', this function is synchronous and
-does not report on the status of the process.
-
-FILE-OR-LIST may be a file, a list of files, or nil.  When non-nil, the
-file names are converted to Jujutsu fileset expressions and appended to
-ARGS.  If the caller would like to pass a raw file or list of files not
-converted to a jj fileset, they should be included in ARGS.
-
-See also `vc-jj--command-parseable' and `vc-jj--command-dispatched.'"
-  (with-temp-buffer
-    (let* ((root (and file-or-list (vc-jj-root (car (ensure-list file-or-list)))))
-           (default-directory (or root default-directory))
-           (fileset (mapcar #'vc-jj--filename-to-fileset (ensure-list file-or-list)))
-           (status (apply #'process-file vc-jj-program nil
-                          (list (current-buffer) nil) nil
-                          (append args fileset))))
-      (unless (eq status 0)
-        (error "'jj' exited with status %s" status))
+FILE-OR-LIST may be nil or non-nil.  When nil, the process is run in
+`default-directory' and jj operates on whatever its default scope is for
+the given subcommand.  When non-nil, it should be a file or a list of
+files.  The process is run in the repository root the first file belongs
+in.  These file names are converted to jj fileset expressions and
+appended to ARGS.  If the caller would like to pass a raw file or list
+of files not converted to a jj fileset, they should be included in ARGS."
+  (let* ((files (ensure-list file-or-list))
+         (root (and files (vc-jj-root (car files))))
+         (default-directory (or root default-directory))
+         (filesets (mapcar #'vc-jj--filename-to-fileset files))
+         status lines)
+    (with-temp-buffer
+      (setq status (apply #'vc-jj--call nil '(t nil)
+                          (append args filesets)))
+      (unless (zerop status)
+        (error "Vc-jj: 'jj' exited with status %s" status))
+      ;; REVIEW 2026-04-06: Does the comment below still hold?
+      ;;
+      ;; Strip ANSI escape sequences: even with the "--color never" jj
+      ;; option, TRAMP connections have been observed to introduce
+      ;; spurious sequences.
       (ansi-color-filter-region (point-min) (point-max))
       (goto-char (point-min))
-      (let (lines)
-        (while (not (eobp))
-          (setq lines (cons (buffer-substring-no-properties
-                             (line-beginning-position)
-                             (line-end-position))
-                            lines))
-          (forward-line 1))
-        (nreverse lines)))))
+      (while (not (eobp))
+        (push (buffer-substring-no-properties (pos-bol) (pos-eol))
+              lines)
+        (forward-line 1)))
+    (nreverse lines)))
 
 (defun vc-jj--command-parseable (file-or-list &rest args)
-  "Call jj with FILE-OR-LIST and ARGS, returning stdout as a string.
-Return is the process\\='s stdout with ANSI escape sequences removed.
-An error is signaled if jj exits with a non-zero status.
+  "Run jj with FILE-OR-LIST and ARGS, returning stdout as a string.
+Return the process's stdout with ANSI escape sequences removed.  An
+error is signaled if jj exits with a non-zero status.
 
 All stderr is discarded (since jj prints warnings to stderr even when
-run with '--quiet').  As a result, the returned string is safe for
-parsing.
+run with the \"--quiet\" option).  As a result, the returned string is
+safe for parsing.
 
-Unlike `vc-jj--command-dispatched', this function is synchronous and
-does not report on the status of the process.
-
-FILE-OR-LIST may be a file, a list of files, or nil.  When non-nil, the
-file names are converted to Jujutsu fileset expressions and appended to
-ARGS.  If the caller would like to pass a raw file or list of files not
-converted to a jj fileset, they should be included in ARGS.
-
-See also `vc-jj--process-lines'."
-  (with-temp-buffer
-    (let* ((root (and file-or-list (vc-jj-root (car (ensure-list file-or-list)))))
-           (default-directory (or root default-directory))
-           (fileset (mapcar #'vc-jj--filename-to-fileset (ensure-list file-or-list)))
-           (status (apply #'process-file vc-jj-program nil
-                          (list (current-buffer) nil) nil
-                          (append args fileset))))
-      (unless (eq status 0)
-	(error "'jj' exited with status %s" status))
+FILE-OR-LIST may be nil or non-nil.  When nil, the process is run in
+`default-directory' and jj operates on whatever its default scope is for
+the given subcommand.  When non-nil, it should be a file or a list of
+files.  The process is run in the repository root the first file belongs
+in.  These file names are converted to jj fileset expressions and
+appended to ARGS.  If the caller would like to pass a raw file or list
+of files not converted to a jj fileset, they should be included in ARGS."
+  (let* ((files (ensure-list file-or-list))
+         (root (and files (vc-jj-root (car files))))
+         (default-directory (or root default-directory))
+         (filesets (mapcar #'vc-jj--filename-to-fileset files))
+         status output)
+    (with-temp-buffer
+      (setq status (apply #'vc-jj--call nil '(t nil)
+                          (append args filesets)))
+      (unless (zerop status)
+        (error "Vc-jj: 'jj' exited with status %s" status))
       (ansi-color-filter-region (point-min) (point-max))
-      (buffer-substring-no-properties (point-min) (point-max)))))
+      (setq output (buffer-substring-no-properties (point-min) (point-max))))
+    output))
 
 (defun vc-jj--command-dispatched (buffer okstatus file-or-list &rest args)
-  "Run `vc-jj-program' with ARGS.
-The meaning of BUFFER, OKSTATUS, and ARGS is the same as in
-`vc-do-command'; see its documentation for details.  All stderr output
-from the process is discarded so that the returned string is safe for
-parsing.
+  "A wrapper around `vc-do-command' for use in vc-jj.
+Run jj with ARGS and FILE-OR-LIST, with stdout and stderr both sent to
+BUFFER.  The meaning of BUFFER, OKSTATUS, and ARGS is the same as in
+`vc-do-command'; see its docstring for details.
 
-If it is necessary to analyze or interpret jj\\='s output
-programmatically, use `vc-jj--command-parseable' or
-`vc-jj--process-lines' instead.  Those functions are separate from this
-one because jj may write warnings to stderr, and `vc-do-command' (which
-the this function uses and the above ones do not) does not distinguish
-stdout from stderr, making the output unsafe to process automatically.
+Return the process object for async calls and the exit status for
+synchronous calls.
 
-FILE-OR-LIST may be a file, a list of files, or nil.  When non-nil, the
-file names are converted to Jujutsu fileset expressions and appended to
-ARGS.  If the caller would like to pass a raw file or list of files not
-converted to a jj fileset, they should be included in ARGS.
+This function is used by user-facing commands such as `vc-push', hooking
+into VC machinery by means of `vc-do-command'.  If it is necessary to
+parse or interpret jj's output programmatically, use
+`vc-jj--command-parseable' or `vc-jj--process-lines' instead.  Those
+functions distinguish between stderr and stdout, unlike this one, making
+them more suitable for programmatic parsing.
 
-See also `vc-jj--command-parseable' and `vc-jj--process-lines'."
-  (let* ((root (and file-or-list (vc-jj-root (car (ensure-list file-or-list)))))
+FILE-OR-LIST may be nil or non-nil.  When nil, the process is run in
+`default-directory' and jj operates on whatever its default scope is for
+the given subcommand.  When non-nil, it should be a file or a list of
+files.  The process is run in the repository root the first file belongs
+in.  These file names are converted to jj fileset expressions and
+appended to ARGS.  If the caller would like to pass a raw file or list
+of files not converted to a jj fileset, they should be included in ARGS."
+  (let* ((coding-system-for-read (or coding-system-for-read 'utf-8))
+         (coding-system-for-write (or coding-system-for-write 'utf-8))
+         (files (ensure-list file-or-list))
+         (root (and files (vc-jj-root (car files))))
          (default-directory (or root default-directory))
-         (fileset (mapcar #'vc-jj--filename-to-fileset (ensure-list file-or-list)))
+         (filesets (mapcar #'vc-jj--filename-to-fileset files))
          (global-switches (ensure-list vc-jj-global-switches)))
     ;; We pass our prepared fileset to jj directly rather than to
     ;; `vc-do-command', which would pass raw file names to jj
     (apply #'vc-do-command (or buffer "*vc*") okstatus vc-jj-program nil
-           (append global-switches args fileset))))
+           (append global-switches args filesets))))
 
 ;;; BACKEND PROPERTIES
 
@@ -551,16 +568,12 @@ new files."
 
 ;;;; dir-status-file
 
-;; 2026-03-22(Kris B): As far as I've seen, DIR is always the
-;; repository root.  The dir-status-files specification in the
-;; preamble of vc.el does not make it clear, but this seems to be the
-;; case.
 (defun vc-jj-dir-status-files (root-or-subdir files update-function)
   "Call UPDATE-FUNCTION on a computed list of entries for ROOT-OR-SUBDIR.
-Compute a list of entries for ROOT-OR-SUBDIR whose elements are of the
-form (FILE STATE EXTRA), where FILE is relative to ROOT-OR-SUBDIR, STATE
-is a VC state symbol.  Return the result of calling UPDATE-FUNCTION with
-that list as an argument.
+Compute a list of file entries for ROOT-OR-SUBDIR whose elements are of
+the form (FILE STATE EXTRA), where FILE is an absolute path or one
+relative to ROOT-OR-SUBDIR and STATE is a VC state symbol.  Return the
+result of calling UPDATE-FUNCTION with that list as an argument.
 
 FILES is either nil or a list of files relative to ROOT-OR-SUBDIR.  If
 FILES is nil, return the state of all files that don't have the
@@ -575,8 +588,9 @@ For a description of the states relevant to Jujutsu, see the docstring
 of `vc-jj-state'."
   (condition-case err
       ;; A big consideration of this function is performance in large
-      ;; repositories: minimize the number of operations and loops
-      ;; over lists
+      ;; repositories.  This is why we use hash tables rather than
+      ;; lists: minimize the number of operations and loops over
+      ;; lists, which are expensive compared to hash table operations
       (let* ((root (vc-jj-root root-or-subdir))
              (default-directory root)
              (file-diff-types-table
@@ -622,9 +636,10 @@ of `vc-jj-state'."
                   result)))
              (result
               (mapcar (lambda (root-rel-file)
-                        (let (;; The files reported should be relative
-                              ;; to ROOT-OR-SUBDIR
-                              (display-path (file-relative-name root-rel-file root-or-subdir))
+                        (let ((display-path
+                               ;; The files reported should be
+                               ;; relative to ROOT-OR-SUBDIR
+                               (file-relative-name root-rel-file root-or-subdir))
                               (state (vc-jj--deduce-state root-rel-file
                                                           file-diff-types-table
                                                           file-conflict-table)))
@@ -640,7 +655,7 @@ of `vc-jj-state'."
     ;; potential problem.  (See bug#63.) Signal other errors normally.
     (error (if (string-match-p "exited with status 255" (error-message-string err))
                (progn
-                 (warn "Vc-jj: jj failed, possibly due to a corrupted repository (%s)"
+                 (warn "Vc-jj: jj failed, likely due to a corrupted repository (%s)"
                        (vc-jj-root root-or-subdir))
                  (funcall update-function nil nil))
              (signal (car err) (cdr err))))))
@@ -889,45 +904,100 @@ If REV is not specified, revert the file as with `vc-jj-revert'."
   "History variable for `vc-jj-pull'.")
 
 (defun vc-jj-pull (prompt)
-  "JJ-specific implementation of `vc-pull'.
-If PROMPT is non-nil, prompt for the jj command to run (default is \"jj
-git fetch\")."
-  (let* ((command (if prompt
-                      (split-string-shell-command
-                       (read-shell-command
-                        (format "jj git fetch command: ")
-                        (concat vc-jj-program " git fetch")
-                        'vc-jj-pull-history))
-                    `(,vc-jj-program "git" "fetch")))
-         (jj-program (car command))
-         (args (cdr command))
-         (root (vc-jj-root default-directory))
-         (buffer (format "*vc-jj : %s*" (expand-file-name root))))
-    (apply #'vc-do-async-command buffer root jj-program args)
-    (vc-jj--set-up-process-buffer buffer root command)))
+  "Fetch changes from the default repository remote.
+Run \"jj git fetch\", possibly with additional command flags.
+
+The default repository remote is the one specified by the \"git.fetch\"
+setting.  If that is not configured and there are multiple remotes, the
+remote named \"origin\" is fetched.
+
+PROMPT is the prefix argument.  If it is non-nil, prompt the user for
+the specific jj command to run."
+  (vc-jj--pushpull "fetch" prompt 'vc-jj-pull-history))
 
 ;;;; push
 
 (defvar vc-jj-push-history nil
   "History variable for `vc-jj-push'.")
 
+;; We have the work of `vc-jj-push' and `vc-jj-pull' factored out into
+;; `vc-jj--pushpull' because both do the exact same thing but with
+;; different "jj git" subcommands and history variables
+(defun vc-jj--pushpull (subcommand prompt history-var)
+  "Subroutine for `vc-jj-push' and `vc-jj-pull'.
+SUBCOMMAND is the \"jj git\" subcommand to run (e.g., \"push\").  PROMPT
+is the prefix argument; when non-nil, prompt the user to edit the shell
+command before it runs.  HISTORY-VAR is the variable name for the
+minibuffer history variable associated with SUBCOMMAND."
+  ;; Implementation modified from `vc-git--pushpull'
+  (let* ((root (vc-jj-root default-directory))
+         (buffer (format "*vc-jj : %s*" (expand-file-name root)))
+         (jj-program vc-jj-program)
+         (command-args (append (ensure-list vc-jj-global-switches)
+                               (list "git" subcommand)))
+         proc)
+    
+    ;; Do the command
+    (if (boundp 'vc-filter-command-function)
+        (let ((vc-filter-command-function
+               (if prompt
+                   (lambda (&rest args)
+                     (let ((vc-user-edit-command-history history-var))
+                       ;; As directed by the docstring of
+                       ;; `vc-filter-command-function', see `vc-do-command'
+                       ;; for what PROGRAM, _FILE-OR-LIST, and FLAGS are
+                       (cl-destructuring-bind (&whole args program _file-or-list flags)
+                           (apply #'vc-user-edit-command args)
+                         ;; Update relevant variables according to the
+                         ;; edits the user made from the call to
+                         ;; `vc-user-edit-command' above
+                         (setq jj-program program
+                               command-args flags)
+                         args)))
+                 vc-filter-command-function)))
+          (setq proc (apply #'vc-do-async-command buffer root jj-program command-args)))
+      ;; Emacs 28 didn't yet have `vc-filter-command-function' or
+      ;; `vc-user-edit-command', so we use the simple
+      ;; `read-shell-command' to edit the command when PROMPT is
+      ;; non-nil
+      (let* ((full-command (cons vc-jj-program command-args))
+             (command-list
+              (if prompt
+                  (split-string-shell-command
+                   (read-shell-command "Edit VC command: "
+                                       (string-join full-command " ")
+                                       history-var))
+                full-command)))
+        (setq jj-program (car command-list)
+              command-args (cdr command-list))
+        ;; `vc-do-async-command' returned BUFFER in Emacs 28
+        (apply #'vc-do-async-command buffer root jj-program command-args)
+        (setq proc (get-buffer-process (get-buffer buffer)))))
+    (set-process-query-on-exit-flag proc t)
+    
+    ;; Set up compilation buffer
+    (with-current-buffer buffer
+      (vc-run-delayed
+        (vc-compilation-mode 'jj)
+        (setq-local compile-command (string-join (cons jj-program command-args) " "))
+        (setq-local compilation-directory root)
+        ;; Either set `compilation-buffer-name-function' locally to
+        ;; nil or use `compilation-arguments' to set `name-function'.
+        ;; See `compilation-buffer-name'.
+        (setq-local compilation-arguments
+                    (list compile-command nil
+                          (lambda (_name-of-mode) buffer)
+                          nil))
+        (ansi-color-filter-region (point-min) (point-max))))
+    (vc-set-async-update buffer)))
+
 (defun vc-jj-push (prompt)
-  "JJ-specific implementation of `vc-push'.
-If PROMPT is non-nil, prompt for the command to run (default is \"jj git
-push\")."
-  (let* ((command (if prompt
-                      (split-string-shell-command
-                       (read-shell-command
-                        (format "jj git push command: ")
-                        (concat vc-jj-program " git push")
-                        'vc-jj-push-history))
-                    `(,vc-jj-program "git" "push")))
-         (jj-program (car command))
-         (args (cdr command))
-         (root (vc-jj-root default-directory))
-         (buffer (format "*vc-jj : %s*" (expand-file-name root))))
-    (apply #'vc-do-async-command buffer root jj-program args)
-    (vc-jj--set-up-process-buffer buffer root command)))
+  "Push changes to the remote of the default tracking bookmark.
+Run \"jj git push\", possibly with additional command flags.
+
+PROMPT is the prefix argument.  If it is non-nil, prompt the user for
+the specific jj command to run."
+  (vc-jj--pushpull "push" prompt 'vc-jj-push-history))
 
 ;;;; steal-lock
 
@@ -1343,32 +1413,78 @@ asynchronously."
 
 ;;;; revision-completion-table
 
-(defun vc-jj--revision-annotation-function (elem)
-  "Calculate propertized change description from ELEM.
-ELEM can be of the form (change-id . description), as produced in
-`vc-jj-revision-completion-table', in which case we return the second
-element, or can be a change id, in which case we query for the first
-line of its description."
-  (let ((description
-         (if (listp elem)
-             (cl-second elem)
-           (vc-jj--command-parseable nil "log" "--no-graph"
-                                     "-r" elem "-T" "self.description().first_line()"))))
+(defun vc-jj--change-annotation-function (cand change-desc-table)
+  "Return a propertized change description for CAND.
+CAND is a change ID as a string, possibly with a change offset, if it is
+a divergent change.  CHANGE-DESC-TABLE is a hash table mapping change
+IDs (optionally with offsets) to the first line of each change's
+description."
+  (let ((description (gethash cand change-desc-table)))
     (format " %s" (propertize description 'face 'completions-annotations))))
 
 (defun vc-jj-revision-completion-table (files)
-  "Return a completion table for existing revisions of FILES."
-  (let* ((revisions
-          (mapcar
-           ;; Boldly assuming that jj's change ids won't suddenly change length
-           (lambda (line) (list (substring line 0 31) (substring line 32)))
-           (apply #'vc-jj--process-lines files "log" "--no-graph"
-                  "-T" "self.change_id() ++ self.description().first_line() ++ '\n'"))))
+  "Return a completion table for revisions that changed any file in FILES.
+FILES is a list of repository files."
+  ;; Considering performance is crucial for this function since it
+  ;; will often call for information on a significant portion of the
+  ;; repository history.
+  (let* (;; Hash table from change ID (with a change offset if it is
+         ;; divergent) to first line of its description
+         (change-desc-table (make-hash-table :test #'equal))
+         ;; Populate CHANGE-DESC-TABLE and pass it to
+         ;; `vc-jj--change-annotation-function' so that it already has
+         ;; all the information it needs.  This way, we do not need to
+         ;; call jj in that function every time we need to retrieve
+         ;; e.g. the change description
+         (annotation-fn
+          (lambda (cand)
+            (vc-jj--change-annotation-function cand change-desc-table))))
+    
+    ;; Implementation note: we choose to output the jj result into a
+    ;; buffer and directly operate in that buffer, as opposed to
+    ;; retrieving the text of the buffer and manipulating strings.
+    ;; The reason is performance: manipulation and operations in and
+    ;; on buffers is much faster and induces significantly less GC
+    ;; pressure compared to converting that buffer's text into a
+    ;; string or a lists of strings (i.e., a bunch of Lisp objects)
+    ;; then operating on them.
+    (with-temp-buffer
+      (apply #'vc-jj--call nil t "log" "--no-graph"
+             "-T" "concat(
+  self.change_id(), '\t',
+  self.change_offset(), '\t',
+  self.divergent(), '\t',
+  self.description().first_line(),
+  '\n'
+)"
+             (mapcar #'vc-jj--filename-to-fileset files))
+      (goto-char (point-min))
+      (while (not (eobp))
+        (re-search-forward (rx bol
+                               (group (+ (any lower-case))) "\t"
+                               (group (+ digit)) "\t"
+                               (group (or "true" "false")) "\t"
+                               (group (*? anything)) eol)
+                           nil t)
+        ;; Starting jj v0.37.0, change IDs of divergent changes are
+        ;; made unique by a numeric suffix, a change offset.  The 0
+        ;; offset points to the most recent commit of a divergent
+        ;; change ID.  We need to pass the change ID with its offset
+        ;; to jj for divergent commits, otherwise jj will error.
+        (let* ((change-id (match-string 1))
+               (change-offset (match-string 2))
+               (divergentp (string-equal "true" (match-string 3)))
+               (change-id-with-offset
+                (concat change-id (when divergentp (format "/%s" change-offset))))
+               (desc-first-line (match-string 4)))
+          (puthash change-id-with-offset desc-first-line change-desc-table))
+        (forward-line 1)))
+    
     (lambda (string pred action)
       (if (eq action 'metadata)
-          `(metadata . ((display-sort-function . ,#'identity)
-                        (annotation-function . ,#'vc-jj--revision-annotation-function)))
-        (complete-with-action action revisions string pred)))))
+          `(metadata . ((display-sort-function . ,#'identity) ; Retain chronological order
+                        (annotation-function . ,annotation-fn)))
+        (complete-with-action action change-desc-table string pred)))))
 
 ;;;; annotate-command
 

@@ -30,6 +30,9 @@
     invocations of `vc-jj-diff'.
   • The vc-dir buffer no longer lists entries for up-to-date and ignored
     files, as per the VC specification.
+  • Commands that rely on `vc-jj-revision-completion-table', such as
+    `vc-revision-other-window', are now drastically faster and do not
+    error when there are divergent changes in the repository history.
 
 
 1.2 [0.5] - 2025-12-21
@@ -114,8 +117,4 @@
   • Added `vc-jj-create-tag', which implements the vc.el create-tag
     method.  This makes it possible to use vc commands like
     `vc-create-branch', which call `vc-create-tag'.
-  • Added several commands to manipulate bookmarks in
-    `vc-jj-log-view-mode': `vc-jj-bookmark-set',
-    `vc-jj-bookmark-delete', and `vc-jj-bookmark-rename'.  These have
-    bindings under the "b" prefix key
   …  …
