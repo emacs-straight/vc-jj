@@ -13,6 +13,7 @@
   • Added support for asynchronous `vc-checkin', effecting
     `vc-next-action' when making commits.  (Supported only on Emacs
     >=31, which has the `vc-async-checkin' user option.)
+  • Show file rename information in vc-dir buffer entries.
 
 
 1.1.2 Changed
@@ -116,5 +117,4 @@
     `vc-retrieve-tag'.
   • Added `vc-jj-create-tag', which implements the vc.el create-tag
     method.  This makes it possible to use vc commands like
-    `vc-create-branch', which call `vc-create-tag'.
   …  …
