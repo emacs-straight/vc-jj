@@ -87,6 +87,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'vc)
+(require 'vc-dir)
 (require 'vc-git)
 (require 'log-view)
 (require 'log-edit)
@@ -378,6 +379,13 @@ included in ARGS."
     ;; `vc-do-command', which would pass raw file names to jj
     (apply #'vc-do-command (or buffer "*vc*") okstatus vc-jj-program nil
            (append global-switches args filesets))))
+
+(defun vc-jj--program-version ()
+  "Return the version of the installed jj executable.
+The return value is usable as input to `version<' and related functions."
+  (when-let* ((raw-version (car (vc-jj--process-lines nil "--version")))
+              (version (string-trim raw-version "jj " nil)))
+    version))
 
 ;;; BACKEND PROPERTIES
 
@@ -796,12 +804,6 @@ parents.map(|c| concat(
 
 ;;;; dir-printer
 
-(autoload 'vc-dir-fileinfo->directory "vc-dir")
-(autoload 'vc-dir-fileinfo->display-state "vc-dir")
-(autoload 'vc-dir-fileinfo->state "vc-dir")
-(autoload 'vc-dir-fileinfo->extra "vc-dir")
-(autoload 'vc-dir-fileinfo->name "vc-dir")
-(autoload 'vc-dir-fileinfo->marked "vc-dir")
 (defvar vc-dir-status-mouse-map)
 (defvar vc-dir-filename-mouse-map)
 
@@ -816,7 +818,8 @@ FILEENTRY contains information about a given repository file."
   ;; `vc-git-dir-printer'
   (let* ((isdir (vc-dir-fileinfo->directory fileentry))
          (display-state (cond (isdir "")
-                              ((vc-dir-fileinfo->display-state fileentry))
+                              ;; the `display-state' slot only exists in Emacs >= 31
+                              ((and (functionp 'vc-dir-fileinfo->display-state) (vc-dir-fileinfo->display-state fileentry)))
                               ((vc-dir-fileinfo->state fileentry))))
          (filename (vc-dir-fileinfo->name fileentry))
          (extra (vc-dir-fileinfo->extra fileentry))
