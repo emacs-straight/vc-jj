@@ -1894,7 +1894,12 @@ implementation."
       (mapcar #'expand-file-name files))))
 
 ;;;###autoload
-(add-to-list 'project-vc-backend-markers-alist '(JJ . ".jj"))
+(with-eval-after-load 'project
+  ;; Note: since jj repositories are co-located by default and
+  ;; therefore have both '.jj' and '.git' directories, this entry
+  ;; needs to come before the one for Git.  Using
+  ;; `with-eval-after-load' because of auto-loading, see pr#195.
+  (add-to-list 'project-vc-backend-markers-alist '(JJ . ".jj")))
 
 (provide 'vc-jj)
 ;;; vc-jj.el ends here
